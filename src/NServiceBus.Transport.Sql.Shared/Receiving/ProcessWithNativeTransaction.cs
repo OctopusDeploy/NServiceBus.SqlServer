@@ -22,7 +22,7 @@ namespace NServiceBus.Transport.Sql.Shared
                 using (var connection = await connectionFactory.OpenNewConnection(cancellationToken).ConfigureAwait(false))
                 using (var transaction = connection.BeginTransaction(isolationLevel))
                 {
-                    var receiveResult = await InputQueue.TryReceive(connection, transaction, cancellationToken).ConfigureAwait(false);
+                    var receiveResult = await TryReceiveAnchored(connection, transaction, cancellationToken).ConfigureAwait(false);
                     receiveCountdownEventSignaler.Signal();
 
                     if (receiveResult == MessageReadResult.NoMessage)
@@ -35,6 +35,7 @@ namespace NServiceBus.Transport.Sql.Shared
                     {
                         await ErrorQueue.DeadLetter(receiveResult.PoisonMessage, connection, transaction, cancellationToken).ConfigureAwait(false);
                         transaction.Commit();
+                        Anchor.Advance(receiveResult.RowVersion);
                         return;
                     }
 
@@ -43,6 +44,7 @@ namespace NServiceBus.Transport.Sql.Shared
                     if (await TryHandleDelayedMessage(receiveResult.Message, connection, transaction, cancellationToken).ConfigureAwait(false))
                     {
                         transaction.Commit();
+                        Anchor.Advance(receiveResult.RowVersion);
                         return;
                     }
 
@@ -53,10 +55,14 @@ namespace NServiceBus.Transport.Sql.Shared
                     if (!await TryProcess(receiveResult.Message, transportTransaction, context, cancellationToken).ConfigureAwait(false))
                     {
                         transaction.Rollback();
+                        // the message is visible at the head of the queue again; rescan from the
+                        // head so the immediate retry finds it
+                        Anchor.Reset();
                         return;
                     }
 
                     transaction.Commit();
+                    Anchor.Advance(receiveResult.RowVersion);
                 }
 
                 failureInfoStorage.ClearFailureInfoForMessage(message.TransportId);
@@ -68,6 +74,8 @@ namespace NServiceBus.Transport.Sql.Shared
                     throw;
                 }
                 failureInfoStorage.RecordFailureInfoForMessage(message.TransportId, ex, context);
+                // the receive transaction rolled back and the message is visible again
+                Anchor.Reset();
             }
         }
 

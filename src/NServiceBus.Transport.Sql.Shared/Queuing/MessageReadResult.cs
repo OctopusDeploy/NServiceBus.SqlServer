@@ -2,13 +2,14 @@ namespace NServiceBus.Transport.Sql.Shared
 {
     struct MessageReadResult
     {
-        MessageReadResult(Message message, MessageRow poisonMessage)
+        MessageReadResult(Message message, MessageRow poisonMessage, long rowVersion)
         {
             Message = message;
             PoisonMessage = poisonMessage;
+            RowVersion = rowVersion;
         }
 
-        public static MessageReadResult NoMessage = new MessageReadResult(null, null);
+        public static MessageReadResult NoMessage = new MessageReadResult(null, null, 0);
 
         public bool IsPoison => PoisonMessage != null;
 
@@ -18,14 +19,20 @@ namespace NServiceBus.Transport.Sql.Shared
 
         public MessageRow PoisonMessage { get; }
 
-        public static MessageReadResult Poison(MessageRow messageRow)
+        /// <summary>
+        /// Position of the consumed row in the queue (RowVersion/Seq column). Only populated by
+        /// anchored receives; 0 otherwise. Not part of equality.
+        /// </summary>
+        public long RowVersion { get; }
+
+        public static MessageReadResult Poison(MessageRow messageRow, long rowVersion = 0)
         {
-            return new MessageReadResult(null, messageRow);
+            return new MessageReadResult(null, messageRow, rowVersion);
         }
 
-        public static MessageReadResult Success(Message message)
+        public static MessageReadResult Success(Message message, long rowVersion = 0)
         {
-            return new MessageReadResult(message, null);
+            return new MessageReadResult(message, null, rowVersion);
         }
 
         bool Equals(MessageReadResult other) => Equals(Message, other.Message) && Equals(PoisonMessage, other.PoisonMessage);
