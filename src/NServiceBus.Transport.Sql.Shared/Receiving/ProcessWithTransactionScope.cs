@@ -20,7 +20,7 @@
                 using (var scope = new TransactionScope(TransactionScopeOption.RequiresNew, transactionOptions, TransactionScopeAsyncFlowOption.Enabled))
                 using (var connection = await connectionFactory.OpenNewConnection(cancellationToken).ConfigureAwait(false))
                 {
-                    var receiveResult = await InputQueue.TryReceive(connection, null, cancellationToken).ConfigureAwait(false);
+                    var receiveResult = await TryReceiveAnchored(connection, null, cancellationToken).ConfigureAwait(false);
                     receiveCountdownEventSignaler.Signal();
 
                     if (receiveResult == MessageReadResult.NoMessage)
@@ -33,6 +33,7 @@
                     {
                         await ErrorQueue.DeadLetter(receiveResult.PoisonMessage, connection, null, cancellationToken).ConfigureAwait(false);
                         scope.Complete();
+                        Anchor.Advance(receiveResult.RowVersion);
                         return;
                     }
 
@@ -41,6 +42,7 @@
                     if (await TryHandleDelayedMessage(receiveResult.Message, connection, null, cancellationToken).ConfigureAwait(false))
                     {
                         scope.Complete();
+                        Anchor.Advance(receiveResult.RowVersion);
                         return;
                     }
 
@@ -48,10 +50,14 @@
 
                     if (!await TryProcess(receiveResult.Message, TransportTransactions.TransactionScope(Transaction.Current), context, cancellationToken).ConfigureAwait(false))
                     {
+                        // the message is visible at the head of the queue again once the scope
+                        // rolls back; rescan from the head so the immediate retry finds it
+                        Anchor.Reset();
                         return;
                     }
 
                     scope.Complete();
+                    Anchor.Advance(receiveResult.RowVersion);
                 }
 
                 failureInfoStorage.ClearFailureInfoForMessage(message.TransportId);
@@ -63,6 +69,8 @@
                     throw;
                 }
                 failureInfoStorage.RecordFailureInfoForMessage(message.TransportId, ex, context);
+                // the receive transaction rolled back and the message is visible again
+                Anchor.Reset();
             }
         }
 
