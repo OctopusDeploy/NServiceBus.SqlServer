@@ -18,6 +18,7 @@ namespace NServiceBus.Transport.Sql.Shared
             this.qualifiedTableName = qualifiedTableName;
             Name = queueName;
             receiveCommand = Format(sqlConstants.ReceiveText, this.qualifiedTableName);
+            anchoredReceiveCommand = Format(sqlConstants.AnchoredReceiveText, this.qualifiedTableName);
             purgeCommand = Format(sqlConstants.PurgeText, this.qualifiedTableName);
             this.isStreamSupported = isStreamSupported;
         }
@@ -49,7 +50,20 @@ namespace NServiceBus.Transport.Sql.Shared
                 command.Transaction = transaction;
                 command.CommandType = CommandType.Text;
 
-                return await ReadMessage(command, cancellationToken).ConfigureAwait(false);
+                return await ReadMessage(command, readRowVersion: false, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        public virtual async Task<MessageReadResult> TryReceive(DbConnection connection, DbTransaction transaction, long anchor, CancellationToken cancellationToken = default)
+        {
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText = anchoredReceiveCommand;
+                command.Transaction = transaction;
+                command.CommandType = CommandType.Text;
+                command.AddParameter("Anchor", DbType.Int64, anchor);
+
+                return await ReadMessage(command, readRowVersion: true, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -65,7 +79,7 @@ namespace NServiceBus.Transport.Sql.Shared
             return SendRawMessage(messageRow, connection, transaction, cancellationToken);
         }
 
-        async Task<MessageReadResult> ReadMessage(DbCommand command, CancellationToken cancellationToken)
+        async Task<MessageReadResult> ReadMessage(DbCommand command, bool readRowVersion, CancellationToken cancellationToken)
         {
             var behavior = CommandBehavior.SingleRow;
             if (isStreamSupported)
@@ -80,7 +94,7 @@ namespace NServiceBus.Transport.Sql.Shared
                     return MessageReadResult.NoMessage;
                 }
 
-                var readResult = await MessageRow.Read(dataReader, isStreamSupported, cancellationToken).ConfigureAwait(false);
+                var readResult = await MessageRow.Read(dataReader, isStreamSupported, readRowVersion, cancellationToken).ConfigureAwait(false);
 
                 //HINT: Reading all pending results makes sure that any query execution error,
                 //      sent after the first result, are thrown by the SqlDataReader as SqlExceptions.
@@ -119,6 +133,7 @@ namespace NServiceBus.Transport.Sql.Shared
         protected string qualifiedTableName;
         string peekCommand;
         string receiveCommand;
+        string anchoredReceiveCommand;
         string purgeCommand;
         bool isStreamSupported;
 
