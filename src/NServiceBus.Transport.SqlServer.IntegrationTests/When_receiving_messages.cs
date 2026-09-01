@@ -61,13 +61,18 @@ namespace NServiceBus.Transport.SqlServer.IntegrationTests
 
             await receiver.StartReceive();
 
-            await WaitUntil(() => inputQueue.NumberOfPeeks > 1);
+            // wait until the receiver has drained the fake queue and seen its first empty receive
+            await WaitUntil(() => inputQueue.NumberOfReceives > successfulReceives);
+
+            // give a hot receive loop time to reveal itself; a correctly backed-off pump probes
+            // at most once per backoff interval (default 1s) from here on
+            await Task.Delay(TimeSpan.FromSeconds(1.5));
 
             await receiver.StopReceive();
 
             await infrastructure.Shutdown();
 
-            Assert.That(inputQueue.NumberOfReceives, Is.AtMost(successfulReceives + 2), "Receiver should stop receives after first unsuccessful attempt.");
+            Assert.That(inputQueue.NumberOfReceives, Is.AtMost(successfulReceives + 4), "Receiver should back off receives after the first unsuccessful attempt.");
         }
 
         static async Task WaitUntil(Func<bool> condition, int timeoutInSeconds = 5, CancellationToken cancellationToken = default)

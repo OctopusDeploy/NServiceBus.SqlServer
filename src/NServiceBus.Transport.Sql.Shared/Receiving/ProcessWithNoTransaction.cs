@@ -23,7 +23,7 @@ namespace NServiceBus.Transport.Sql.Shared
                     {
                         var receiveResult = await TryReceiveAnchored(connection, transaction, cancellationToken)
                             .ConfigureAwait(false);
-                        receiveCountdownEventSignaler.Signal();
+                        receiveCountdownEventSignaler.Signal(receiveResult.Successful || receiveResult.IsPoison);
 
                         if (receiveResult == MessageReadResult.NoMessage)
                         {
