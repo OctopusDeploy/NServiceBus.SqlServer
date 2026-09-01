@@ -237,11 +237,15 @@ namespace NServiceBus.Transport.Sql.Shared
             // Wait for all receive operations to complete before returning (and thus dispatching again)
             await receiveLatch.WaitAsync(stopBatchCancellationSource.Token).ConfigureAwait(false);
 
+            Interlocked.Increment(ref TransportPatchDiagnostics.WavesDispatched);
+            Volatile.Write(ref TransportPatchDiagnostics.LastWaveSize, dispatched);
+
             var messagesFound = receiveLatch.MessagesFound;
             if (messagesFound == 0)
             {
                 // the queue is empty: probe again with a single receive after the backoff
                 dispatchRamp = 1;
+                Interlocked.Increment(ref TransportPatchDiagnostics.EmptyWaveBackoffs);
                 await Task.Delay(emptyBatchBackoff, messageReceivingCancellationToken).ConfigureAwait(false);
             }
             else if (messagesFound < dispatched)
@@ -249,6 +253,7 @@ namespace NServiceBus.Transport.Sql.Shared
                 // partial wave: match the observed availability and keep going without a backoff,
                 // otherwise a busy instance cannot keep up with its own arrival rate
                 dispatchRamp = Math.Max(1, messagesFound);
+                Interlocked.Increment(ref TransportPatchDiagnostics.PartialWaves);
             }
             else
             {

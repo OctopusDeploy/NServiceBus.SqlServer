@@ -52,18 +52,48 @@ namespace NServiceBus.Transport.Sql.Shared
         protected async Task<MessageReadResult> TryReceiveAnchored(DbConnection connection, DbTransaction transaction, CancellationToken cancellationToken = default)
         {
             var anchor = Anchor.GetCurrent();
+
+            if (anchor > 0)
+            {
+                Interlocked.Increment(ref TransportPatchDiagnostics.AnchoredReceives);
+            }
+            else
+            {
+                Interlocked.Increment(ref TransportPatchDiagnostics.HeadScanReceives);
+            }
+
             var receiveResult = await InputQueue.TryReceive(connection, transaction, anchor, cancellationToken).ConfigureAwait(false);
 
-            if (!receiveResult.Successful && !receiveResult.IsPoison && anchor > 0 && Anchor.TryEnterHeadScan())
+            if (!receiveResult.Successful && !receiveResult.IsPoison && anchor > 0)
             {
-                try
+                if (Anchor.TryEnterHeadScan())
                 {
-                    receiveResult = await InputQueue.TryReceive(connection, transaction, 0, cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        Interlocked.Increment(ref TransportPatchDiagnostics.HeadScanReceives);
+                        receiveResult = await InputQueue.TryReceive(connection, transaction, 0, cancellationToken).ConfigureAwait(false);
+                        if (receiveResult.Successful || receiveResult.IsPoison)
+                        {
+                            Interlocked.Increment(ref TransportPatchDiagnostics.HeadScanReceivesFound);
+                        }
+                    }
+                    finally
+                    {
+                        Anchor.ExitHeadScan();
+                    }
                 }
-                finally
+                else
                 {
-                    Anchor.ExitHeadScan();
+                    Interlocked.Increment(ref TransportPatchDiagnostics.HeadScanGateSkips);
                 }
+            }
+            else if ((receiveResult.Successful || receiveResult.IsPoison) && anchor > 0)
+            {
+                Interlocked.Increment(ref TransportPatchDiagnostics.AnchoredReceivesFound);
+            }
+            else if ((receiveResult.Successful || receiveResult.IsPoison) && anchor == 0)
+            {
+                Interlocked.Increment(ref TransportPatchDiagnostics.HeadScanReceivesFound);
             }
 
             return receiveResult;

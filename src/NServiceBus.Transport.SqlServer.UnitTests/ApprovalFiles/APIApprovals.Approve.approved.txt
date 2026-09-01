@@ -97,6 +97,40 @@ namespace NServiceBus.Transport.SqlServer
         public void UseCatalogForQueue(string queueName, string catalog) { }
         public void UseSchemaForQueue(string queueName, string schema) { }
     }
+    public static class SqlServerTransportPatch
+    {
+        public const string Summary = "Octopus performance patch for NServiceBus.Transport.SqlServer 9.0.1 (branch sql-f" +
+            "ix-9.0.1). Fixes DB load growing superlinearly with the number of competing-cons" +
+            "umer instances. (.1) ANCHORED RECEIVE: each receiver tracks the highest RowVersi" +
+            "on it consumed and dequeues WHERE RowVersion > @Anchor - an index seek past the " +
+            "contended head of the queue index (other instances\' locked in-flight rows + ghos" +
+            "t records of recent deletes) instead of a scan through it. Safety: an empty anch" +
+            "ored receive falls back to one from-head receive before the queue is treated as " +
+            "empty; the anchor resets on local rollback so immediate retries still work; a pe" +
+            "riodic from-head rescan bounds how long a message rolled back on ANOTHER instanc" +
+            "e can wait. (.2) The rescan interval is floored at 1s so an aggressive peek dela" +
+            "y (Octopus: 100ms) cannot turn the rescan back into a hot head-scan loop. (.3) T" +
+            "he empty-receive fallback head scan is gated to ONE prober per receiver at a tim" +
+            "e - with wide concurrency (64 x cores) hundreds of simultaneous empty seeks prev" +
+            "iously each paid a full head scan, which measured WORSE than the unpatched trans" +
+            "port in shallow-queue steady state. (.4) The peek query is REMOVED (it no longer" +
+            " runs at all). Its max-min backlog estimate counts gaps left by in-flight rows a" +
+            "nd wildly over-reports under competing consumers, causing huge waves of empty re" +
+            "ceives. The pump now probes with real receives and adapts: one probe after idle/" +
+            "empty; the wave doubles while fully successful; a partial wave sets the next wav" +
+            "e to the observed availability (no backoff, so a busy node keeps up); a fully em" +
+            "pty wave resets to one probe plus the backoff (QueuePeekerOptions.Delay). Waves " +
+            "are capped at 64 per instance. (.5) This diagnostics facade. Measured (SQL Serve" +
+            "r 2022, concurrency 256, 100ms peek delay, 50ms handler, DB CPU ms/msg at 1/6/12" +
+            " nodes): steady 400 msg/s 2.86/3.00/3.32 vs unpatched 3.49/5.88/6.69; drain of a" +
+            " 20k backlog at 12 nodes 2.13 vs 6.28 at equal throughput, receive p99 278ms -> " +
+            "16ms. Trade-offs: cross-node redelivery of a rolled-back message is bounded by t" +
+            "he rescan interval (~1s) instead of immediate; same-node retries unaffected; bes" +
+            "t-effort FIFO slightly coarser; receive ramps 1->2->4->...->64 over a few sub-se" +
+            "cond waves after idle instead of jumping to the peek estimate.";
+        public const string Version = "9.0.1-anchored-receive.5";
+        public static string Describe() { }
+    }
     public class SubscriptionOptions
     {
         public SubscriptionOptions() { }
