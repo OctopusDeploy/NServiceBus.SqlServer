@@ -14,7 +14,7 @@ namespace NServiceBus.Transport.SqlServer
         /// <summary>
         /// The patch version baked into this assembly.
         /// </summary>
-        public static string Version => "9.0.1-anchored-receive.7";
+        public static string Version => "9.0.1-anchored-receive.8";
 
         /// <summary>
         /// Ceiling for the receive dispatch wave per receiver (default 64). Takes effect
@@ -79,6 +79,8 @@ namespace NServiceBus.Transport.SqlServer
             "re-check in ~0.9s; delayedMoverWon/Skipped counters show the election working. " +
             "(.7) Runtime knobs on this class: MaxDispatchWave (immediate), HeadRescanFloor and " +
             "DelayedMoverElectionEnabled (set before Endpoint.Start). Process-wide. " +
+            "(.8) Defaults tuned for small (2-core) instances: MaxDispatchWave default 16 (was 64; " +
+            "swept 64/32/16 at 6 nodes x concurrency 128 - 16 tied steady state and won backlog drain). " +
             "Measured (SQL Server 2022, concurrency 256, 100ms peek delay, 50ms handler, DB CPU ms/msg at " +
             "1/6/12 nodes): steady 400 msg/s 2.86/3.00/3.32 vs unpatched 3.49/5.88/6.69; drain of a 20k " +
             "backlog at 12 nodes 2.13 vs 6.28 at equal throughput, receive p99 278ms -> 16ms. " +
