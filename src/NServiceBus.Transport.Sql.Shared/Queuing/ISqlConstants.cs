@@ -7,6 +7,7 @@ interface ISqlConstants
     string ReceiveText { get; set; }
     string AnchoredReceiveText { get; set; }
     string MoveDueDelayedMessageText { get; set; }
+    string LegacyMoveDueDelayedMessageText { get; set; }
     string PeekText { get; set; }
     string AddMessageBodyStringColumn { get; set; }
     string CreateQueueText { get; set; }

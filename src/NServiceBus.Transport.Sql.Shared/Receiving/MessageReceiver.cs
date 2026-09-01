@@ -31,8 +31,9 @@ namespace NServiceBus.Transport.Sql.Shared
             // The head rescan is the expensive from-head receive that picks up messages which
             // reappeared behind the anchor (e.g. rolled back on another instance). Its interval
             // trades that pickup latency against paying the old contended head-scan cost, so it
-            // must not shrink with an aggressively tuned peek delay (e.g. 100ms) — floor it at 1s.
-            var headRescanInterval = emptyBatchBackoff > MinimumHeadRescanInterval ? emptyBatchBackoff : MinimumHeadRescanInterval;
+            // must not shrink with an aggressively tuned peek delay (e.g. 100ms) — floor it.
+            var headRescanFloor = TransportPatchKnobs.HeadRescanFloor;
+            var headRescanInterval = emptyBatchBackoff > headRescanFloor ? emptyBatchBackoff : headRescanFloor;
             receiveAnchor = new ReceiveAnchor(headRescanInterval);
             this.errorQueueAddress = errorQueueAddress;
             this.criticalErrorAction = criticalErrorAction;
@@ -201,9 +202,10 @@ namespace NServiceBus.Transport.Sql.Shared
         async Task ReceiveMessages(CancellationToken messageReceivingCancellationToken)
         {
             // If either the receiving or processing circuit breakers are triggered, probe with one receive at a time.
+            var maxDispatchWave = TransportPatchKnobs.MaxDispatchWave;
             var wave = messageProcessingCircuitBreaker.IsTriggered || messageReceivingCircuitBreaker.IsTriggered
                 ? 1
-                : Math.Min(dispatchRamp, Math.Min(MaxDispatchWave, maxConcurrency));
+                : Math.Min(dispatchRamp, Math.Min(maxDispatchWave, maxConcurrency));
 
             messageReceivingCancellationToken.ThrowIfCancellationRequested();
 
@@ -257,7 +259,7 @@ namespace NServiceBus.Transport.Sql.Shared
             }
             else
             {
-                dispatchRamp = Math.Min(MaxDispatchWave, dispatchRamp * 2);
+                dispatchRamp = Math.Min(maxDispatchWave, dispatchRamp * 2);
             }
         }
 
@@ -314,8 +316,6 @@ namespace NServiceBus.Transport.Sql.Shared
         readonly IExceptionClassifier exceptionClassifier;
         TimeSpan waitTimeCircuitBreaker;
         readonly TimeSpan emptyBatchBackoff;
-        static readonly TimeSpan MinimumHeadRescanInterval = TimeSpan.FromSeconds(1);
-        const int MaxDispatchWave = 64;
         readonly ReceiveAnchor receiveAnchor;
         int dispatchRamp = 1;
         volatile SemaphoreSlim concurrencyLimiter;

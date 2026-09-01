@@ -99,6 +99,9 @@ namespace NServiceBus.Transport.SqlServer
     }
     public static class SqlServerTransportPatch
     {
+        public static bool DelayedMoverElectionEnabled { get; set; }
+        public static System.TimeSpan HeadRescanFloor { get; set; }
+        public static int MaxDispatchWave { get; set; }
         public static string Summary { get; }
         public static string Version { get; }
         public static string Describe() { }

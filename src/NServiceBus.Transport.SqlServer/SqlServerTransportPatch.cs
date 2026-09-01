@@ -14,7 +14,38 @@ namespace NServiceBus.Transport.SqlServer
         /// <summary>
         /// The patch version baked into this assembly.
         /// </summary>
-        public static string Version => "9.0.1-anchored-receive.6";
+        public static string Version => "9.0.1-anchored-receive.7";
+
+        /// <summary>
+        /// Ceiling for the receive dispatch wave per receiver (default 64). Takes effect
+        /// immediately, so it can be tuned at runtime.
+        /// </summary>
+        public static int MaxDispatchWave
+        {
+            get => Sql.Shared.TransportPatchKnobs.MaxDispatchWave;
+            set => Sql.Shared.TransportPatchKnobs.MaxDispatchWave = value;
+        }
+
+        /// <summary>
+        /// Minimum interval between from-head rescans of a receiver's anchor (default 1s).
+        /// Longer = less head contention, slower cross-instance pickup of rolled-back messages.
+        /// Set BEFORE Endpoint.Start.
+        /// </summary>
+        public static System.TimeSpan HeadRescanFloor
+        {
+            get => Sql.Shared.TransportPatchKnobs.HeadRescanFloor;
+            set => Sql.Shared.TransportPatchKnobs.HeadRescanFloor = value;
+        }
+
+        /// <summary>
+        /// Whether only one instance at a time moves due delayed messages (default true;
+        /// SQL Server only). Set BEFORE Endpoint.Start.
+        /// </summary>
+        public static bool DelayedMoverElectionEnabled
+        {
+            get => Sql.Shared.TransportPatchKnobs.DelayedMoverElectionEnabled;
+            set => Sql.Shared.TransportPatchKnobs.DelayedMoverElectionEnabled = value;
+        }
 
         /// <summary>
         /// What this patch changes relative to the official NServiceBus.Transport.SqlServer 9.0.1.
@@ -46,6 +77,8 @@ namespace NServiceBus.Transport.SqlServer
             "index past each other's locked batches - the receive-path contention pattern all over again, " +
             "painful on endpoints with many delayed messages. Losers skip the table without touching it and " +
             "re-check in ~0.9s; delayedMoverWon/Skipped counters show the election working. " +
+            "(.7) Runtime knobs on this class: MaxDispatchWave (immediate), HeadRescanFloor and " +
+            "DelayedMoverElectionEnabled (set before Endpoint.Start). Process-wide. " +
             "Measured (SQL Server 2022, concurrency 256, 100ms peek delay, 50ms handler, DB CPU ms/msg at " +
             "1/6/12 nodes): steady 400 msg/s 2.86/3.00/3.32 vs unpatched 3.49/5.88/6.69; drain of a 20k " +
             "backlog at 12 nodes 2.13 vs 6.28 at equal throughput, receive p99 278ms -> 16ms. " +
@@ -61,6 +94,9 @@ namespace NServiceBus.Transport.SqlServer
         {
             var builder = new StringBuilder(4000);
             builder.Append("[SqlServerTransportPatch ").Append(Version).Append("] ");
+            builder.Append("knobs: MaxDispatchWave=").Append(MaxDispatchWave);
+            builder.Append(" HeadRescanFloor=").Append(HeadRescanFloor);
+            builder.Append(" DelayedMoverElectionEnabled=").Append(DelayedMoverElectionEnabled).Append("; ");
             TransportPatchDiagnostics.AppendSnapshot(builder);
             builder.Append(" | ").Append(Summary);
 

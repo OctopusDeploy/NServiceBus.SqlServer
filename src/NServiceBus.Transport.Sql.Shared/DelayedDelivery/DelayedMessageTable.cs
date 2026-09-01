@@ -18,7 +18,10 @@ namespace NServiceBus.Transport.Sql.Shared
         public DelayedMessageTable(ISqlConstants sqlConstants, string delayedQueueTable, string inputQueueTable)
         {
             storeCommand = string.Format(sqlConstants.StoreDelayedMessageText, delayedQueueTable);
-            moveDueCommand = string.Format(sqlConstants.MoveDueDelayedMessageText, delayedQueueTable, inputQueueTable);
+            var moveText = TransportPatchKnobs.DelayedMoverElectionEnabled
+                ? sqlConstants.MoveDueDelayedMessageText
+                : sqlConstants.LegacyMoveDueDelayedMessageText;
+            moveDueCommand = string.Format(moveText, delayedQueueTable, inputQueueTable);
         }
 
         public event EventHandler<DateTime> OnStoreDelayedMessage;

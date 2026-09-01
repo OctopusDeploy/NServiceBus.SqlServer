@@ -138,6 +138,28 @@ OUTPUT
 IF (@NOCOUNT = 'ON') SET NOCOUNT ON;
 IF (@NOCOUNT = 'OFF') SET NOCOUNT OFF;";
 
+        // The pre-election move statement, used when SqlServerTransportPatch.DelayedMoverElectionEnabled
+        // is turned off: every instance moves due messages independently.
+        public string LegacyMoveDueDelayedMessageText { get; set; } = @"
+;WITH message AS (
+    SELECT TOP(@BatchSize) *
+    FROM {0} WITH (UPDLOCK, READPAST, ROWLOCK)
+    WHERE Due < GETUTCDATE())
+DELETE FROM message
+OUTPUT
+    NEWID(),
+    NULL,
+    NULL,
+    1,
+    NULL,
+    deleted.Headers,
+    deleted.Body
+INTO {1} (Id, CorrelationId, ReplyToAddress, Recoverable, Expires, Headers, Body);
+
+SELECT TOP 1 GETUTCDATE() as UtcNow, Due as NextDue
+FROM {0} WITH (READPAST)
+ORDER BY Due";
+
         // Only one instance at a time moves due delayed messages (application-lock election,
         // released with the surrounding transaction). Competing movers on every node scan the
         // same matured head of the [Due] index past each other's locked batches — the same
