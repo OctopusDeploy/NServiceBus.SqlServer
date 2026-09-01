@@ -66,6 +66,19 @@ namespace NServiceBus.Transport.Sql.Shared
                     var sqlNow = reader.GetDateTime(0);
                     var sqlNextDue = reader.GetDateTime(1);
 
+                    // Providers with mover election (SQL Server) report the outcome as a third column
+                    if (reader.FieldCount > 2)
+                    {
+                        if (reader.GetBoolean(2))
+                        {
+                            Interlocked.Increment(ref TransportPatchDiagnostics.DelayedMoverWon);
+                        }
+                        else
+                        {
+                            Interlocked.Increment(ref TransportPatchDiagnostics.DelayedMoverSkipped);
+                        }
+                    }
+
                     if (sqlNextDue <= sqlNow)
                     {
                         return DateTime.UtcNow;

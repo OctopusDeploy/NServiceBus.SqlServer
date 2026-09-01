@@ -14,12 +14,12 @@ namespace NServiceBus.Transport.SqlServer
         /// <summary>
         /// The patch version baked into this assembly.
         /// </summary>
-        public const string Version = "9.0.1-anchored-receive.5";
+        public static string Version => "9.0.1-anchored-receive.6";
 
         /// <summary>
         /// What this patch changes relative to the official NServiceBus.Transport.SqlServer 9.0.1.
         /// </summary>
-        public const string Summary =
+        public static string Summary =>
             "Octopus performance patch for NServiceBus.Transport.SqlServer 9.0.1 (branch sql-fix-9.0.1). " +
             "Fixes DB load growing superlinearly with the number of competing-consumer instances. " +
             "(.1) ANCHORED RECEIVE: each receiver tracks the highest RowVersion it consumed and dequeues " +
@@ -40,6 +40,12 @@ namespace NServiceBus.Transport.SqlServer
             "observed availability (no backoff, so a busy node keeps up); a fully empty wave resets to one " +
             "probe plus the backoff (QueuePeekerOptions.Delay). Waves are capped at 64 per instance. " +
             "(.5) This diagnostics facade. " +
+            "(.6) DELAYED-MOVER ELECTION: only one instance at a time moves due delayed messages " +
+            "(sp_getapplock, transaction-owned, per delayed table; SQL Server only). Previously every " +
+            "instance polled and moved from the same delayed table, scanning the matured head of the [Due] " +
+            "index past each other's locked batches - the receive-path contention pattern all over again, " +
+            "painful on endpoints with many delayed messages. Losers skip the table without touching it and " +
+            "re-check in ~0.9s; delayedMoverWon/Skipped counters show the election working. " +
             "Measured (SQL Server 2022, concurrency 256, 100ms peek delay, 50ms handler, DB CPU ms/msg at " +
             "1/6/12 nodes): steady 400 msg/s 2.86/3.00/3.32 vs unpatched 3.49/5.88/6.69; drain of a 20k " +
             "backlog at 12 nodes 2.13 vs 6.28 at equal throughput, receive p99 278ms -> 16ms. " +
