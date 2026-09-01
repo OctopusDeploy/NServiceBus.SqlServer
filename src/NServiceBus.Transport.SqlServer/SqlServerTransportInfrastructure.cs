@@ -125,7 +125,6 @@ namespace NServiceBus.Transport.SqlServer
                 guarantee => SelectProcessStrategy(guarantee, transactionOptions, connectionFactory);
 
             var queuePurger = new QueuePurger(connectionFactory);
-            var queuePeeker = new QueuePeeker(connectionFactory, exceptionClassifier, queuePeekerOptions.Delay);
 
             IExpiredMessagesPurger expiredMessagesPurger;
             bool validateExpiredIndex;
@@ -196,7 +195,7 @@ namespace NServiceBus.Transport.SqlServer
 
                 return new SqlServerMessageReceiver(transport, receiveSetting.Id, receiveAddress, receiveSetting.ErrorQueue, hostSettings.CriticalErrorAction, processStrategyFactory, queueFactory, queuePurger,
                     expiredMessagesPurger,
-                    queuePeeker, schemaVerification, transport.TimeToWaitBeforeTriggeringCircuitBreaker, queuePeekerOptions.Delay, subscriptionManager, receiveSetting.PurgeOnStartup, exceptionClassifier);
+                    schemaVerification, transport.TimeToWaitBeforeTriggeringCircuitBreaker, queuePeekerOptions.Delay, subscriptionManager, receiveSetting.PurgeOnStartup, exceptionClassifier);
 
             }).ToDictionary<MessageReceiver, string, IMessageReceiver>(receiver => receiver.Id, receiver => receiver);
 
