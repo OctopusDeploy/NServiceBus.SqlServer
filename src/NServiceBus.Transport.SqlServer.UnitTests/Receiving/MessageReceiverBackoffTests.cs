@@ -12,26 +12,26 @@ using NUnit.Framework;
 public class MessageReceiverBackoffTests
 {
     [Test]
-    public async Task Backs_off_peeking_when_receives_come_up_empty()
+    public async Task Probes_an_empty_queue_with_single_backed_off_receives()
     {
-        // Simulates a node in a multi-node (competing consumer) setup that keeps losing the race
-        // for messages: peek reports a backlog, but every receive comes up empty because other
-        // nodes grabbed the messages. Without a backoff the pump re-peeks in a hot loop, which
-        // multiplies the load on the queue table by the number of nodes.
-        var peeker = new CountingPeeker();
-        var receiver = CreateReceiver(peeker, emptyBatchBackoff: TimeSpan.FromMilliseconds(200));
+        // Simulates a node in a multi-node (competing consumer) setup whose queue is empty (or
+        // whose messages keep being won by other nodes): every receive finds nothing. The pump
+        // must throttle to one probe receive per backoff interval instead of fanning out
+        // concurrency-wide waves in a hot loop.
+        var strategy = new CountingEmptyReceiveStrategy();
+        var receiver = CreateReceiver(strategy, emptyBatchBackoff: TimeSpan.FromMilliseconds(200));
 
         await receiver.Initialize(new PushRuntimeSettings(8), (_, _) => Task.CompletedTask, (_, _) => Task.FromResult(ErrorHandleResult.Handled)).ConfigureAwait(false);
         await receiver.StartReceive().ConfigureAwait(false);
         await Task.Delay(TimeSpan.FromMilliseconds(700)).ConfigureAwait(false);
         await receiver.StopReceive().ConfigureAwait(false);
 
-        // ~700ms with a 200ms backoff allows for a handful of peek iterations; an unthrottled
-        // pump reaches hundreds.
-        Assert.That(peeker.PeekCount, Is.LessThanOrEqualTo(6));
+        // ~700ms with a 200ms backoff allows a handful of single-receive probes; an unthrottled
+        // pump reaches thousands of receive attempts.
+        Assert.That(strategy.ReceiveAttempts, Is.LessThanOrEqualTo(8));
     }
 
-    static MessageReceiver CreateReceiver(CountingPeeker peeker, TimeSpan emptyBatchBackoff)
+    static MessageReceiver CreateReceiver(ProcessStrategy strategy, TimeSpan emptyBatchBackoff)
     {
         var queue = new FakeQueue();
         var classifier = new SqlServerExceptionClassifier();
@@ -42,10 +42,9 @@ public class MessageReceiverBackoffTests
             "queue",
             "error",
             (_, _, _) => { },
-            _ => new EmptyReceiveStrategy(classifier),
+            _ => strategy,
             _ => queue,
             new FakePurger(),
-            peeker,
             TimeSpan.FromSeconds(30),
             emptyBatchBackoff,
             new FakeSubscriptionManager(),
@@ -53,30 +52,22 @@ public class MessageReceiverBackoffTests
             classifier);
     }
 
-    class CountingPeeker : IPeekMessagesInQueue
+    class CountingEmptyReceiveStrategy : ProcessStrategy
     {
-        int peekCount;
+        int receiveAttempts;
 
-        public int PeekCount => Volatile.Read(ref peekCount);
-
-        public Task<int> Peek(TableBasedQueue inputQueue, RepeatedFailuresOverTimeCircuitBreaker circuitBreaker, CancellationToken cancellationToken = default)
-        {
-            Interlocked.Increment(ref peekCount);
-            return Task.FromResult(10);
-        }
-    }
-
-    class EmptyReceiveStrategy : ProcessStrategy
-    {
-        public EmptyReceiveStrategy(IExceptionClassifier exceptionClassifier)
-            : base(null, exceptionClassifier, null)
+        public CountingEmptyReceiveStrategy()
+            : base(null, new SqlServerExceptionClassifier(), null)
         {
         }
+
+        public int ReceiveAttempts => Volatile.Read(ref receiveAttempts);
 
         public override Task ProcessMessage(CancellationTokenSource stopBatchCancellationTokenSource, ReceiveCountdownEvent.Signaler receiveCountdownEventSignaler, CancellationToken cancellationToken = default)
         {
+            Interlocked.Increment(ref receiveAttempts);
+            receiveCountdownEventSignaler.Signal(false);
             stopBatchCancellationTokenSource.Cancel();
-            receiveCountdownEventSignaler.Signal();
             return Task.CompletedTask;
         }
     }

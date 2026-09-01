@@ -21,7 +21,7 @@
                 using (var connection = await connectionFactory.OpenNewConnection(cancellationToken).ConfigureAwait(false))
                 {
                     var receiveResult = await TryReceiveAnchored(connection, null, cancellationToken).ConfigureAwait(false);
-                    receiveCountdownEventSignaler.Signal();
+                    receiveCountdownEventSignaler.Signal(receiveResult.Successful || receiveResult.IsPoison);
 
                     if (receiveResult == MessageReadResult.NoMessage)
                     {

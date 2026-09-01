@@ -153,7 +153,6 @@ class PostgreSqlTransportInfrastructure : TransportInfrastructure
             guarantee => SelectProcessStrategy(guarantee, transactionOptions, connectionFactory);
 
         var queuePurger = new QueuePurger(connectionFactory);
-        var queuePeeker = new QueuePeeker(connectionFactory, exceptionClassifier, queuePeekerOptions.Delay);
 
         var queueFactory = new Func<string, PostgreSqlTableBasedQueue>(queueName => new PostgreSqlTableBasedQueue(sqlConstants,
             addressTranslator.Parse(queueName).QualifiedTableName, queueName, true));
@@ -206,7 +205,7 @@ class PostgreSqlTransportInfrastructure : TransportInfrastructure
 
             return new MessageReceiver(transport, receiveSetting.Id, receiveAddress, receiveSetting.ErrorQueue,
                 hostSettings.CriticalErrorAction, processStrategyFactory, queueFactory, queuePurger,
-                queuePeeker, transport.TimeToWaitBeforeTriggeringCircuitBreaker, queuePeekerOptions.Delay,
+                transport.TimeToWaitBeforeTriggeringCircuitBreaker, queuePeekerOptions.Delay,
                 subscriptionManager, receiveSetting.PurgeOnStartup, exceptionClassifier);
         }).ToDictionary<MessageReceiver, string, IMessageReceiver>(receiver => receiver.Id, receiver => receiver);
 
