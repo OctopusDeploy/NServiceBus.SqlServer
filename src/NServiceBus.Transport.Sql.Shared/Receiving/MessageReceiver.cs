@@ -30,7 +30,12 @@ namespace NServiceBus.Transport.Sql.Shared
             this.queuePeeker = queuePeeker;
             this.waitTimeCircuitBreaker = waitTimeCircuitBreaker;
             this.emptyBatchBackoff = emptyBatchBackoff;
-            receiveAnchor = new ReceiveAnchor(headRescanInterval: emptyBatchBackoff);
+            // The head rescan is the expensive from-head receive that picks up messages which
+            // reappeared behind the anchor (e.g. rolled back on another instance). Its interval
+            // trades that pickup latency against paying the old contended head-scan cost, so it
+            // must not shrink with an aggressively tuned peek delay (e.g. 100ms) — floor it at 1s.
+            var headRescanInterval = emptyBatchBackoff > MinimumHeadRescanInterval ? emptyBatchBackoff : MinimumHeadRescanInterval;
+            receiveAnchor = new ReceiveAnchor(headRescanInterval);
             this.errorQueueAddress = errorQueueAddress;
             this.criticalErrorAction = criticalErrorAction;
             this.purgeAllMessagesOnStartup = purgeAllMessagesOnStartup;
@@ -293,6 +298,7 @@ namespace NServiceBus.Transport.Sql.Shared
         readonly IExceptionClassifier exceptionClassifier;
         TimeSpan waitTimeCircuitBreaker;
         readonly TimeSpan emptyBatchBackoff;
+        static readonly TimeSpan MinimumHeadRescanInterval = TimeSpan.FromSeconds(1);
         readonly ReceiveAnchor receiveAnchor;
         CancellationTokenSource lastBatchCancellationSource;
         volatile SemaphoreSlim concurrencyLimiter;
