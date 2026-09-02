@@ -130,7 +130,7 @@ namespace NServiceBus.Transport.Sql.Shared
             }
         }
 
-        public async Task StopReceive(CancellationToken cancellationToken = default)
+        public virtual async Task StopReceive(CancellationToken cancellationToken = default)
         {
             if (messageReceivingCancellationTokenSource == null)
             {

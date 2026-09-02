@@ -29,9 +29,30 @@ class SqlServerMessageReceiver : MessageReceiver
     {
         await base.Initialize(limitations, onMessage, onError, cancellationToken).ConfigureAwait(false);
 
+        // Self-identify once per process at WARN so hosts that run the package as-is can verify
+        // from their logs which patch version and knob values are actually loaded.
+        if (Interlocked.Exchange(ref patchDescribedOnStart, 1) == 0)
+        {
+            Logger.Warn(SqlServerTransportPatch.Describe());
+        }
+
         await PurgeExpiredMessages(cancellationToken).ConfigureAwait(false);
         await PerformSchemaInspection(cancellationToken).ConfigureAwait(false);
     }
+
+    public override async Task StopReceive(CancellationToken cancellationToken = default)
+    {
+        await base.StopReceive(cancellationToken).ConfigureAwait(false);
+
+        // Final counter snapshot for the run, once per process at the first receiver shutdown
+        if (Interlocked.Exchange(ref patchDescribedOnStop, 1) == 0)
+        {
+            Logger.Warn(SqlServerTransportPatch.Describe());
+        }
+    }
+
+    static int patchDescribedOnStart;
+    static int patchDescribedOnStop;
 
     async Task PerformSchemaInspection(CancellationToken cancellationToken) =>
         await schemaInspector.PerformInspection((SqlTableBasedQueue)inputQueue, cancellationToken).ConfigureAwait(false);
