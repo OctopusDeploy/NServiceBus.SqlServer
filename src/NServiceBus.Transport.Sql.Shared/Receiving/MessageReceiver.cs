@@ -16,7 +16,6 @@ namespace NServiceBus.Transport.Sql.Shared
             Func<TransportTransactionMode, ProcessStrategy> processStrategyFactory,
             Func<string, TableBasedQueue> queueFactory,
             IPurgeQueues queuePurger,
-            IPeekMessagesInQueue queuePeeker,
             TimeSpan waitTimeCircuitBreaker,
             TimeSpan emptyBatchBackoff,
             ISubscriptionManager subscriptionManager,
@@ -27,7 +26,6 @@ namespace NServiceBus.Transport.Sql.Shared
             this.processStrategyFactory = processStrategyFactory;
             this.queuePurger = queuePurger;
             this.queueFactory = queueFactory;
-            this.queuePeeker = queuePeeker;
             this.waitTimeCircuitBreaker = waitTimeCircuitBreaker;
             this.emptyBatchBackoff = emptyBatchBackoff;
             // The head rescan is the expensive from-head receive that picks up messages which
@@ -190,42 +188,31 @@ namespace NServiceBus.Transport.Sql.Shared
             }
         }
 
+        // Instead of peeking, the pump probes with receives directly and adapts the dispatch
+        // wave to what it actually finds: after an idle/empty period a single receive probes the
+        // queue; the wave doubles while every receive in it finds a message, tracks the observed
+        // availability on a partial wave, and resets with a backoff when a whole wave comes up
+        // empty. This removes the peek query entirely and — more importantly for clusters with
+        // high concurrency settings — stops fanning out hundreds of receives on the strength of
+        // the peek's gap-inflated (max-min) backlog estimate, which under competing consumers
+        // wasted an empty receive round-trip many times per message. The wave is additionally
+        // capped: with very high concurrency limits, one synchronized burst of receives per
+        // instance produces latch/lock spikes on the queue head without improving throughput.
         async Task ReceiveMessages(CancellationToken messageReceivingCancellationToken)
         {
-            if (lastBatchCancellationSource != null && lastBatchCancellationSource.IsCancellationRequested)
-            {
-                lastBatchCancellationSource = null;
-
-                // A receive in the previous batch found the queue empty even though the peek saw
-                // messages — competing instances consumed them first. Back off like an empty peek
-                // instead of re-peeking immediately, otherwise every message arrival sends all
-                // instances into a hot peek/receive loop against the same queue table.
-                await Task.Delay(emptyBatchBackoff, messageReceivingCancellationToken).ConfigureAwait(false);
-            }
-
-            var messageCount = await queuePeeker
-                .Peek(inputQueue, messageReceivingCircuitBreaker, messageReceivingCancellationToken)
-                .ConfigureAwait(false);
-
-            if (messageCount == 0)
-            {
-                return;
-            }
+            // If either the receiving or processing circuit breakers are triggered, probe with one receive at a time.
+            var wave = messageProcessingCircuitBreaker.IsTriggered || messageReceivingCircuitBreaker.IsTriggered
+                ? 1
+                : Math.Min(dispatchRamp, Math.Min(MaxDispatchWave, maxConcurrency));
 
             messageReceivingCancellationToken.ThrowIfCancellationRequested();
 
             // We cannot dispose this token source because of potential race conditions of concurrent processing
             var stopBatchCancellationSource = new CancellationTokenSource();
-            lastBatchCancellationSource = stopBatchCancellationSource;
 
-            // If either the receiving or processing circuit breakers are triggered, start only one message processing task at a time.
-            var maximumConcurrentProcessing =
-                messageProcessingCircuitBreaker.IsTriggered || messageReceivingCircuitBreaker.IsTriggered
-                    ? 1
-                    : messageCount;
-
-            var receiveLatch = new ReceiveCountdownEvent(maximumConcurrentProcessing);
-            for (var i = 0; i < maximumConcurrentProcessing; i++)
+            var receiveLatch = new ReceiveCountdownEvent(wave);
+            var dispatched = 0;
+            for (var i = 0; i < wave; i++)
             {
                 if (stopBatchCancellationSource.IsCancellationRequested)
                 {
@@ -235,13 +222,38 @@ namespace NServiceBus.Transport.Sql.Shared
                 var localConcurrencyLimiter = concurrencyLimiter;
 
                 await localConcurrencyLimiter.WaitAsync(messageReceivingCancellationToken).ConfigureAwait(false);
+                dispatched++;
 
                 _ = ProcessMessagesSwallowExceptionsAndReleaseConcurrencyLimiter(stopBatchCancellationSource,
                     localConcurrencyLimiter, receiveLatch, messageProcessingCancellationTokenSource.Token);
             }
 
-            // Wait for all receive operations to complete before returning (and thus peeking again)
+            // Release the latch slots of receives that were never dispatched (early batch stop)
+            for (var i = dispatched; i < wave; i++)
+            {
+                receiveLatch.GetSignaler().Signal();
+            }
+
+            // Wait for all receive operations to complete before returning (and thus dispatching again)
             await receiveLatch.WaitAsync(stopBatchCancellationSource.Token).ConfigureAwait(false);
+
+            var messagesFound = receiveLatch.MessagesFound;
+            if (messagesFound == 0)
+            {
+                // the queue is empty: probe again with a single receive after the backoff
+                dispatchRamp = 1;
+                await Task.Delay(emptyBatchBackoff, messageReceivingCancellationToken).ConfigureAwait(false);
+            }
+            else if (messagesFound < dispatched)
+            {
+                // partial wave: match the observed availability and keep going without a backoff,
+                // otherwise a busy instance cannot keep up with its own arrival rate
+                dispatchRamp = Math.Max(1, messagesFound);
+            }
+            else
+            {
+                dispatchRamp = Math.Min(MaxDispatchWave, dispatchRamp * 2);
+            }
         }
 
         async Task ProcessMessagesSwallowExceptionsAndReleaseConcurrencyLimiter(
@@ -293,14 +305,14 @@ namespace NServiceBus.Transport.Sql.Shared
         readonly Func<TransportTransactionMode, ProcessStrategy> processStrategyFactory;
         readonly IPurgeQueues queuePurger;
         readonly Func<string, TableBasedQueue> queueFactory;
-        readonly IPeekMessagesInQueue queuePeeker;
         readonly bool purgeAllMessagesOnStartup;
         readonly IExceptionClassifier exceptionClassifier;
         TimeSpan waitTimeCircuitBreaker;
         readonly TimeSpan emptyBatchBackoff;
         static readonly TimeSpan MinimumHeadRescanInterval = TimeSpan.FromSeconds(1);
+        const int MaxDispatchWave = 64;
         readonly ReceiveAnchor receiveAnchor;
-        CancellationTokenSource lastBatchCancellationSource;
+        int dispatchRamp = 1;
         volatile SemaphoreSlim concurrencyLimiter;
         CancellationTokenSource messageReceivingCancellationTokenSource;
         CancellationTokenSource messageProcessingCancellationTokenSource;
