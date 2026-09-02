@@ -13,6 +13,7 @@ namespace NServiceBus.Transport.Sql.Shared
     {
         protected TableBasedQueue InputQueue;
         protected TableBasedQueue ErrorQueue;
+        protected ReceiveAnchor Anchor;
 
         OnMessage onMessage;
         OnError onError;
@@ -25,10 +26,11 @@ namespace NServiceBus.Transport.Sql.Shared
             log = LogManager.GetLogger(GetType());
         }
 
-        public void Init(TableBasedQueue inputQueue, TableBasedQueue errorQueue, OnMessage onMessage, OnError onError, Action<string, Exception, CancellationToken> criticalError)
+        public void Init(TableBasedQueue inputQueue, TableBasedQueue errorQueue, ReceiveAnchor receiveAnchor, OnMessage onMessage, OnError onError, Action<string, Exception, CancellationToken> criticalError)
         {
             InputQueue = inputQueue;
             ErrorQueue = errorQueue;
+            Anchor = receiveAnchor;
 
             this.onMessage = onMessage;
             this.onError = onError;
@@ -37,6 +39,35 @@ namespace NServiceBus.Transport.Sql.Shared
 
         public abstract Task ProcessMessage(CancellationTokenSource stopBatchCancellationTokenSource,
             ReceiveCountdownEvent.Signaler receiveCountdownEventSignaler, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Receives seeking past the anchor (the contended head region of the queue: other
+        /// instances' locked in-flight rows and remains of recently consumed rows). When nothing
+        /// is found past the anchor, rescans once from the head so messages that reappeared
+        /// behind it (for example rolled back on another instance) are found before the queue is
+        /// declared empty. The rescan is gated: with wide processing concurrency many receives
+        /// hit an empty seek at the same moment, and a single from-head probe settles whether the
+        /// queue is really empty — the rest report no message without paying for the scan.
+        /// </summary>
+        protected async Task<MessageReadResult> TryReceiveAnchored(DbConnection connection, DbTransaction transaction, CancellationToken cancellationToken = default)
+        {
+            var anchor = Anchor.GetCurrent();
+            var receiveResult = await InputQueue.TryReceive(connection, transaction, anchor, cancellationToken).ConfigureAwait(false);
+
+            if (!receiveResult.Successful && !receiveResult.IsPoison && anchor > 0 && Anchor.TryEnterHeadScan())
+            {
+                try
+                {
+                    receiveResult = await InputQueue.TryReceive(connection, transaction, 0, cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    Anchor.ExitHeadScan();
+                }
+            }
+
+            return receiveResult;
+        }
 
         protected async Task<bool> TryHandleMessage(Message message, TransportTransaction transportTransaction, ContextBag context, CancellationToken cancellationToken = default)
         {

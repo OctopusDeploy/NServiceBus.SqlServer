@@ -18,6 +18,7 @@ namespace NServiceBus.Transport.Sql.Shared
             IPurgeQueues queuePurger,
             IPeekMessagesInQueue queuePeeker,
             TimeSpan waitTimeCircuitBreaker,
+            TimeSpan emptyBatchBackoff,
             ISubscriptionManager subscriptionManager,
             bool purgeAllMessagesOnStartup,
             IExceptionClassifier exceptionClassifier)
@@ -28,6 +29,13 @@ namespace NServiceBus.Transport.Sql.Shared
             this.queueFactory = queueFactory;
             this.queuePeeker = queuePeeker;
             this.waitTimeCircuitBreaker = waitTimeCircuitBreaker;
+            this.emptyBatchBackoff = emptyBatchBackoff;
+            // The head rescan is the expensive from-head receive that picks up messages which
+            // reappeared behind the anchor (e.g. rolled back on another instance). Its interval
+            // trades that pickup latency against paying the old contended head-scan cost, so it
+            // must not shrink with an aggressively tuned peek delay (e.g. 100ms) — floor it at 1s.
+            var headRescanInterval = emptyBatchBackoff > MinimumHeadRescanInterval ? emptyBatchBackoff : MinimumHeadRescanInterval;
+            receiveAnchor = new ReceiveAnchor(headRescanInterval);
             this.errorQueueAddress = errorQueueAddress;
             this.criticalErrorAction = criticalErrorAction;
             this.purgeAllMessagesOnStartup = purgeAllMessagesOnStartup;
@@ -56,7 +64,7 @@ namespace NServiceBus.Transport.Sql.Shared
             inputQueue = queueFactory(ReceiveAddress);
             errorQueue = queueFactory(errorQueueAddress);
 
-            processStrategy.Init(inputQueue, errorQueue, onMessage, onError, criticalErrorAction);
+            processStrategy.Init(inputQueue, errorQueue, receiveAnchor, onMessage, onError, criticalErrorAction);
 
             if (purgeAllMessagesOnStartup)
             {
@@ -184,6 +192,17 @@ namespace NServiceBus.Transport.Sql.Shared
 
         async Task ReceiveMessages(CancellationToken messageReceivingCancellationToken)
         {
+            if (lastBatchCancellationSource != null && lastBatchCancellationSource.IsCancellationRequested)
+            {
+                lastBatchCancellationSource = null;
+
+                // A receive in the previous batch found the queue empty even though the peek saw
+                // messages — competing instances consumed them first. Back off like an empty peek
+                // instead of re-peeking immediately, otherwise every message arrival sends all
+                // instances into a hot peek/receive loop against the same queue table.
+                await Task.Delay(emptyBatchBackoff, messageReceivingCancellationToken).ConfigureAwait(false);
+            }
+
             var messageCount = await queuePeeker
                 .Peek(inputQueue, messageReceivingCircuitBreaker, messageReceivingCancellationToken)
                 .ConfigureAwait(false);
@@ -197,6 +216,7 @@ namespace NServiceBus.Transport.Sql.Shared
 
             // We cannot dispose this token source because of potential race conditions of concurrent processing
             var stopBatchCancellationSource = new CancellationTokenSource();
+            lastBatchCancellationSource = stopBatchCancellationSource;
 
             // If either the receiving or processing circuit breakers are triggered, start only one message processing task at a time.
             var maximumConcurrentProcessing =
@@ -277,6 +297,10 @@ namespace NServiceBus.Transport.Sql.Shared
         readonly bool purgeAllMessagesOnStartup;
         readonly IExceptionClassifier exceptionClassifier;
         TimeSpan waitTimeCircuitBreaker;
+        readonly TimeSpan emptyBatchBackoff;
+        static readonly TimeSpan MinimumHeadRescanInterval = TimeSpan.FromSeconds(1);
+        readonly ReceiveAnchor receiveAnchor;
+        CancellationTokenSource lastBatchCancellationSource;
         volatile SemaphoreSlim concurrencyLimiter;
         CancellationTokenSource messageReceivingCancellationTokenSource;
         CancellationTokenSource messageProcessingCancellationTokenSource;

@@ -21,7 +21,8 @@ namespace NServiceBus.Transport.Sql.Shared
                 {
                     using (var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted))
                     {
-                        var receiveResult = await InputQueue.TryReceive(connection, transaction, cancellationToken).ConfigureAwait(false);
+                        var receiveResult = await TryReceiveAnchored(connection, transaction, cancellationToken)
+                            .ConfigureAwait(false);
                         receiveCountdownEventSignaler.Signal();
 
                         if (receiveResult == MessageReadResult.NoMessage)
@@ -36,6 +37,7 @@ namespace NServiceBus.Transport.Sql.Shared
                                 .DeadLetter(receiveResult.PoisonMessage, connection, transaction, cancellationToken)
                                 .ConfigureAwait(false);
                             transaction.Commit();
+                            Anchor.Advance(receiveResult.RowVersion);
                             return;
                         }
 
@@ -45,10 +47,12 @@ namespace NServiceBus.Transport.Sql.Shared
                                 cancellationToken).ConfigureAwait(false))
                         {
                             transaction.Commit();
+                            Anchor.Advance(receiveResult.RowVersion);
                             return;
                         }
 
                         transaction.Commit();
+                        Anchor.Advance(receiveResult.RowVersion);
                     }
                 }
                 catch (Exception ex) when (!exceptionClassifier.IsOperationCancelled(ex, cancellationToken))
@@ -58,6 +62,8 @@ namespace NServiceBus.Transport.Sql.Shared
                         throw;
                     }
                     failureInfoStorage.RecordFailureInfoForMessage(message.TransportId, ex, context);
+                    // the receive transaction rolled back and the message is visible again
+                    Anchor.Reset();
                     return;
                 }
 
