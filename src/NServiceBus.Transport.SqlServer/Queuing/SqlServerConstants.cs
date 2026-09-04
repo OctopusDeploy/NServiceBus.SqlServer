@@ -81,6 +81,12 @@ VALUES (
 IF(@NOCOUNT = 'ON') SET NOCOUNT ON;
 IF(@NOCOUNT = 'OFF') SET NOCOUNT OFF;";
 
+        // The INDEX hint pins the ordered RowVersion plan. Without it the optimizer periodically
+        // recompiles the receive (typically after auto-stats sees the table near-empty) to a
+        // TableScan + Sort — and because deleting from a heap never releases pages, an "empty"
+        // queue heap can hold tens of thousands of pages (measured: 45,052 pages / 352 MB), so
+        // each receive goes from ~0.5 ms / 8 pages to ~100 ms / 45,000 pages until the next
+        // recompile. Requires the transport-created Index_RowVersion index to exist.
         public string ReceiveText { get; set; } = @"
 DECLARE @NOCOUNT VARCHAR(3) = 'OFF';
 IF ( (512 & @@OPTIONS) = 512 ) SET @NOCOUNT = 'ON';
@@ -88,7 +94,7 @@ SET NOCOUNT ON;
 
 WITH message AS (
     SELECT TOP(1) *
-    FROM {0} WITH (UPDLOCK, READPAST, ROWLOCK)
+    FROM {0} WITH (UPDLOCK, READPAST, ROWLOCK, INDEX(Index_RowVersion))
     ORDER BY RowVersion)
 DELETE FROM message
 OUTPUT
@@ -118,7 +124,7 @@ SET NOCOUNT ON;
 
 WITH message AS (
     SELECT TOP(1) *
-    FROM {0} WITH (UPDLOCK, READPAST, ROWLOCK)
+    FROM {0} WITH (UPDLOCK, READPAST, ROWLOCK, INDEX(Index_RowVersion))
     WHERE RowVersion > @Anchor
     ORDER BY RowVersion)
 DELETE FROM message
@@ -143,7 +149,7 @@ IF (@NOCOUNT = 'OFF') SET NOCOUNT OFF;";
         public string LegacyMoveDueDelayedMessageText { get; set; } = @"
 ;WITH message AS (
     SELECT TOP(@BatchSize) *
-    FROM {0} WITH (UPDLOCK, READPAST, ROWLOCK)
+    FROM {0} WITH (UPDLOCK, READPAST, ROWLOCK, INDEX(Index_Due))
     WHERE Due < GETUTCDATE())
 DELETE FROM message
 OUTPUT
@@ -157,7 +163,7 @@ OUTPUT
 INTO {1} (Id, CorrelationId, ReplyToAddress, Recoverable, Expires, Headers, Body);
 
 SELECT TOP 1 GETUTCDATE() as UtcNow, Due as NextDue
-FROM {0} WITH (READPAST)
+FROM {0} WITH (READPAST, INDEX(Index_Due))
 ORDER BY Due";
 
         // Only one instance at a time moves due delayed messages (application-lock election,
@@ -173,7 +179,7 @@ IF @moverLock >= 0
 BEGIN
     ;WITH message AS (
         SELECT TOP(@BatchSize) *
-        FROM {0} WITH (UPDLOCK, READPAST, ROWLOCK)
+        FROM {0} WITH (UPDLOCK, READPAST, ROWLOCK, INDEX(Index_Due))
         WHERE Due < GETUTCDATE())
     DELETE FROM message
     OUTPUT
@@ -187,7 +193,7 @@ BEGIN
     INTO {1} (Id, CorrelationId, ReplyToAddress, Recoverable, Expires, Headers, Body);
 
     SELECT TOP 1 GETUTCDATE() as UtcNow, Due as NextDue, CAST(1 AS bit) as MoverLockAcquired
-    FROM {0} WITH (READPAST)
+    FROM {0} WITH (READPAST, INDEX(Index_Due))
     ORDER BY Due
 END
 ELSE
