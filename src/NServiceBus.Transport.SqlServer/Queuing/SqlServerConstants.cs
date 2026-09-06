@@ -81,12 +81,15 @@ VALUES (
 IF(@NOCOUNT = 'ON') SET NOCOUNT ON;
 IF(@NOCOUNT = 'OFF') SET NOCOUNT OFF;";
 
-        // The INDEX hint pins the ordered RowVersion plan. Without it the optimizer periodically
+        // {1} is the plan-pinning INDEX hint, resolved at runtime from the table's actual index
+        // names (installations name them differently: the transport default is Index_RowVersion,
+        // Octopus creates IX_NSB_<Endpoint>_Row_Version), or empty when no matching index exists.
+        // The hint pins the ordered RowVersion plan: without it the optimizer periodically
         // recompiles the receive (typically after auto-stats sees the table near-empty) to a
         // TableScan + Sort — and because deleting from a heap never releases pages, an "empty"
         // queue heap can hold tens of thousands of pages (measured: 45,052 pages / 352 MB), so
         // each receive goes from ~0.5 ms / 8 pages to ~100 ms / 45,000 pages until the next
-        // recompile. Requires the transport-created Index_RowVersion index to exist.
+        // recompile.
         public string ReceiveText { get; set; } = @"
 DECLARE @NOCOUNT VARCHAR(3) = 'OFF';
 IF ( (512 & @@OPTIONS) = 512 ) SET @NOCOUNT = 'ON';
@@ -94,7 +97,7 @@ SET NOCOUNT ON;
 
 WITH message AS (
     SELECT TOP(1) *
-    FROM {0} WITH (UPDLOCK, READPAST, ROWLOCK, INDEX(Index_RowVersion))
+    FROM {0} WITH (UPDLOCK, READPAST, ROWLOCK{1})
     ORDER BY RowVersion)
 DELETE FROM message
 OUTPUT
@@ -124,7 +127,7 @@ SET NOCOUNT ON;
 
 WITH message AS (
     SELECT TOP(1) *
-    FROM {0} WITH (UPDLOCK, READPAST, ROWLOCK, INDEX(Index_RowVersion))
+    FROM {0} WITH (UPDLOCK, READPAST, ROWLOCK{1})
     WHERE RowVersion > @Anchor
     ORDER BY RowVersion)
 DELETE FROM message
@@ -149,7 +152,7 @@ IF (@NOCOUNT = 'OFF') SET NOCOUNT OFF;";
         public string LegacyMoveDueDelayedMessageText { get; set; } = @"
 ;WITH message AS (
     SELECT TOP(@BatchSize) *
-    FROM {0} WITH (UPDLOCK, READPAST, ROWLOCK, INDEX(Index_Due))
+    FROM {0} WITH (UPDLOCK, READPAST, ROWLOCK{2})
     WHERE Due < GETUTCDATE())
 DELETE FROM message
 OUTPUT
@@ -163,7 +166,7 @@ OUTPUT
 INTO {1} (Id, CorrelationId, ReplyToAddress, Recoverable, Expires, Headers, Body);
 
 SELECT TOP 1 GETUTCDATE() as UtcNow, Due as NextDue
-FROM {0} WITH (READPAST, INDEX(Index_Due))
+FROM {0} WITH (READPAST{2})
 ORDER BY Due";
 
         // Only one instance at a time moves due delayed messages (application-lock election,
@@ -179,7 +182,7 @@ IF @moverLock >= 0
 BEGIN
     ;WITH message AS (
         SELECT TOP(@BatchSize) *
-        FROM {0} WITH (UPDLOCK, READPAST, ROWLOCK, INDEX(Index_Due))
+        FROM {0} WITH (UPDLOCK, READPAST, ROWLOCK{2})
         WHERE Due < GETUTCDATE())
     DELETE FROM message
     OUTPUT
@@ -193,7 +196,7 @@ BEGIN
     INTO {1} (Id, CorrelationId, ReplyToAddress, Recoverable, Expires, Headers, Body);
 
     SELECT TOP 1 GETUTCDATE() as UtcNow, Due as NextDue, CAST(1 AS bit) as MoverLockAcquired
-    FROM {0} WITH (READPAST, INDEX(Index_Due))
+    FROM {0} WITH (READPAST{2})
     ORDER BY Due
 END
 ELSE
@@ -203,6 +206,17 @@ END";
 
         public string PeekText { get; set; } = @"
 SELECT isnull(cast(max([RowVersion]) - min([RowVersion]) + 1 AS int), 0) Id FROM {0} WITH (READPAST, READCOMMITTEDLOCK)";
+
+        public string FindIndexByLeadingColumnText { get; set; } = @"
+SELECT TOP 1 i.name
+FROM sys.indexes i
+INNER JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal = 1
+INNER JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+WHERE i.object_id = OBJECT_ID('{0}')
+    AND c.name = '{1}'
+    AND i.type = 2
+    AND i.is_disabled = 0
+ORDER BY i.index_id";
 
         public string AddMessageBodyStringColumn { get; set; } = @"
 IF NOT EXISTS (

@@ -1,4 +1,4 @@
-﻿namespace NServiceBus.Transport.PostgreSql;
+namespace NServiceBus.Transport.PostgreSql;
 
 using NServiceBus.Transport.Sql.Shared;
 
@@ -57,6 +57,9 @@ RETURNING rs.id,
         END Expired,
         rs.Headers, rs.Body, rs.Seq::bigint;
 ";
+
+    // PostgreSQL has no index hints; plan pinning is not applicable.
+    public string FindIndexByLeadingColumnText { get; set; }
 
     // PostgreSQL has no mover election; both texts are identical.
     public string LegacyMoveDueDelayedMessageText { get; set; } = @"

@@ -17,11 +17,67 @@ namespace NServiceBus.Transport.Sql.Shared
     {
         public DelayedMessageTable(ISqlConstants sqlConstants, string delayedQueueTable, string inputQueueTable)
         {
+            this.sqlConstants = sqlConstants;
+            this.delayedQueueTable = delayedQueueTable;
+            this.inputQueueTable = inputQueueTable;
             storeCommand = string.Format(sqlConstants.StoreDelayedMessageText, delayedQueueTable);
-            var moveText = TransportPatchKnobs.DelayedMoverElectionEnabled
+            moveText = TransportPatchKnobs.DelayedMoverElectionEnabled
                 ? sqlConstants.MoveDueDelayedMessageText
                 : sqlConstants.LegacyMoveDueDelayedMessageText;
-            moveDueCommand = string.Format(moveText, delayedQueueTable, inputQueueTable);
+            // start without a plan-pinning hint; resolved from the actual index names on first move
+            moveDueCommand = string.Format(moveText, delayedQueueTable, inputQueueTable, "");
+        }
+
+        /// <summary>
+        /// Resolves the plan-pinning INDEX hint against whatever the installation actually named
+        /// the Due index (transport default Index_Due; Octopus IX_NSB_&lt;Endpoint&gt;Delayed_Due).
+        /// Runs once per table instance; without a matching index the statement stays unhinted.
+        /// </summary>
+        async Task EnsurePlanPinningHintResolved(DbConnection connection, DbTransaction transaction, CancellationToken cancellationToken)
+        {
+            if (planHintResolved)
+            {
+                return;
+            }
+
+            var findIndexText = sqlConstants.FindIndexByLeadingColumnText;
+            if (string.IsNullOrEmpty(findIndexText) || !TransportPatchKnobs.PlanPinningHintsEnabled)
+            {
+                planHintResolved = true;
+                return;
+            }
+
+            try
+            {
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = string.Format(findIndexText, delayedQueueTable, "Due");
+                    command.CommandType = CommandType.Text;
+                    command.Transaction = transaction;
+
+                    if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is string indexName)
+                    {
+                        var hint = ", INDEX([" + indexName.Replace("]", "]]") + "])";
+                        moveDueCommand = string.Format(moveText, delayedQueueTable, inputQueueTable, hint);
+                        Logger.DebugFormat("Due-delayed-message plan for {0} pinned to index [{1}].", delayedQueueTable, indexName);
+                    }
+                    else
+                    {
+                        Logger.WarnFormat("No enabled nonclustered index leading on Due found for {0}; the due-message move cannot be plan-pinned.", delayedQueueTable);
+                    }
+                }
+
+                planHintResolved = true;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // never fail the mover over hint resolution; retry on a later poll
+                Logger.Warn($"Could not resolve the plan-pinning hint for {delayedQueueTable}.", ex);
+            }
         }
 
         public event EventHandler<DateTime> OnStoreDelayedMessage;
@@ -50,6 +106,8 @@ namespace NServiceBus.Transport.Sql.Shared
         public async Task<DateTime> MoveDueMessages(int batchSize, DbConnection connection, DbTransaction transaction,
             CancellationToken cancellationToken = default)
         {
+            await EnsurePlanPinningHintResolved(connection, transaction, cancellationToken).ConfigureAwait(false);
+
             using (var command = connection.CreateCommand())
             {
                 command.Transaction = transaction;
@@ -92,7 +150,14 @@ namespace NServiceBus.Transport.Sql.Shared
             }
         }
 
+        readonly ISqlConstants sqlConstants;
+        readonly string delayedQueueTable;
+        readonly string inputQueueTable;
+        readonly string moveText;
         string storeCommand;
-        string moveDueCommand;
+        volatile string moveDueCommand;
+        volatile bool planHintResolved;
+
+        static readonly Logging.ILog Logger = Logging.LogManager.GetLogger<DelayedMessageTable>();
     }
 }

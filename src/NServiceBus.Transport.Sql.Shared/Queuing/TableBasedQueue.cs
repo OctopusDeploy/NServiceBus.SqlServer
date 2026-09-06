@@ -17,10 +17,67 @@ namespace NServiceBus.Transport.Sql.Shared
             this.sqlConstants = sqlConstants;
             this.qualifiedTableName = qualifiedTableName;
             Name = queueName;
-            receiveCommand = Format(sqlConstants.ReceiveText, this.qualifiedTableName);
-            anchoredReceiveCommand = Format(sqlConstants.AnchoredReceiveText, this.qualifiedTableName);
+            // start without a plan-pinning hint; the hint is resolved from the table's actual
+            // index names on first receive (installations name the indexes differently)
+            receiveCommand = Format(sqlConstants.ReceiveText, this.qualifiedTableName, "");
+            anchoredReceiveCommand = Format(sqlConstants.AnchoredReceiveText, this.qualifiedTableName, "");
             purgeCommand = Format(sqlConstants.PurgeText, this.qualifiedTableName);
             this.isStreamSupported = isStreamSupported;
+        }
+
+        /// <summary>
+        /// Resolves the plan-pinning INDEX hint against whatever the installation actually named
+        /// the RowVersion index (the transport default is Index_RowVersion; Octopus creates
+        /// IX_NSB_&lt;Endpoint&gt;_Row_Version). Runs once per queue instance on the first
+        /// receive; when no matching index exists the statements simply stay unhinted, which is
+        /// the pre-hint behaviour.
+        /// </summary>
+        async Task EnsurePlanPinningHintResolved(DbConnection connection, DbTransaction transaction, CancellationToken cancellationToken)
+        {
+            if (planHintResolved)
+            {
+                return;
+            }
+
+            var findIndexText = sqlConstants.FindIndexByLeadingColumnText;
+            if (string.IsNullOrEmpty(findIndexText) || !TransportPatchKnobs.PlanPinningHintsEnabled)
+            {
+                planHintResolved = true;
+                return;
+            }
+
+            try
+            {
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = Format(findIndexText, qualifiedTableName, "RowVersion");
+                    command.CommandType = CommandType.Text;
+                    command.Transaction = transaction;
+
+                    if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is string indexName)
+                    {
+                        var hint = ", INDEX([" + indexName.Replace("]", "]]") + "])";
+                        receiveCommand = Format(sqlConstants.ReceiveText, qualifiedTableName, hint);
+                        anchoredReceiveCommand = Format(sqlConstants.AnchoredReceiveText, qualifiedTableName, hint);
+                        log.DebugFormat("Receive plan for {0} pinned to index [{1}].", qualifiedTableName, indexName);
+                    }
+                    else
+                    {
+                        log.WarnFormat("No enabled nonclustered index leading on RowVersion found for {0}; receive plans cannot be pinned and may degrade to table scans when the table statistics turn over.", qualifiedTableName);
+                    }
+                }
+
+                planHintResolved = true;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // never fail a receive over hint resolution; retry on a later receive
+                log.Warn($"Could not resolve the receive plan-pinning hint for {qualifiedTableName}.", ex);
+            }
         }
 
         public virtual async Task<int> TryPeek(DbConnection connection, DbTransaction transaction, int? timeoutInSeconds = null, CancellationToken cancellationToken = default)
@@ -44,6 +101,8 @@ namespace NServiceBus.Transport.Sql.Shared
 
         public virtual async Task<MessageReadResult> TryReceive(DbConnection connection, DbTransaction transaction, CancellationToken cancellationToken = default)
         {
+            await EnsurePlanPinningHintResolved(connection, transaction, cancellationToken).ConfigureAwait(false);
+
             using (var command = connection.CreateCommand())
             {
                 command.CommandText = receiveCommand;
@@ -56,6 +115,8 @@ namespace NServiceBus.Transport.Sql.Shared
 
         public virtual async Task<MessageReadResult> TryReceive(DbConnection connection, DbTransaction transaction, long anchor, CancellationToken cancellationToken = default)
         {
+            await EnsurePlanPinningHintResolved(connection, transaction, cancellationToken).ConfigureAwait(false);
+
             using (var command = connection.CreateCommand())
             {
                 command.CommandText = anchoredReceiveCommand;
@@ -132,8 +193,9 @@ namespace NServiceBus.Transport.Sql.Shared
         ISqlConstants sqlConstants;
         protected string qualifiedTableName;
         string peekCommand;
-        string receiveCommand;
-        string anchoredReceiveCommand;
+        volatile string receiveCommand;
+        volatile string anchoredReceiveCommand;
+        volatile bool planHintResolved;
         string purgeCommand;
         bool isStreamSupported;
 

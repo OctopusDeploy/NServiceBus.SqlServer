@@ -28,5 +28,13 @@ namespace NServiceBus.Transport.Sql.Shared
         /// Applied when an endpoint starts.
         /// </summary>
         public static bool DelayedMoverElectionEnabled = true;
+
+        /// <summary>
+        /// Whether receive/mover statements pin their plans with an INDEX hint, resolved at
+        /// runtime from the table's actual index names (SQL Server only). Kill switch in case
+        /// resolution misbehaves on some schema. Read when each queue resolves its hints
+        /// (first receive/move after start).
+        /// </summary>
+        public static bool PlanPinningHintsEnabled = true;
     }
 }

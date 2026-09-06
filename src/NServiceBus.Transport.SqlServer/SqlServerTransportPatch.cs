@@ -14,7 +14,7 @@ namespace NServiceBus.Transport.SqlServer
         /// <summary>
         /// The patch version baked into this assembly.
         /// </summary>
-        public static string Version => "9.0.1-anchored-receive.10";
+        public static string Version => "9.0.1-anchored-receive.11";
 
         /// <summary>
         /// Ceiling for the receive dispatch wave per receiver (default 64). Takes effect
@@ -48,6 +48,17 @@ namespace NServiceBus.Transport.SqlServer
         }
 
         /// <summary>
+        /// Whether receive/mover statements pin their plans with an INDEX hint resolved at
+        /// runtime from the table's actual index names (default true; SQL Server only). Kill
+        /// switch; read on each queue's first receive/move after start.
+        /// </summary>
+        public static bool PlanPinningHintsEnabled
+        {
+            get => Sql.Shared.TransportPatchKnobs.PlanPinningHintsEnabled;
+            set => Sql.Shared.TransportPatchKnobs.PlanPinningHintsEnabled = value;
+        }
+
+        /// <summary>
         /// What this patch changes relative to the official NServiceBus.Transport.SqlServer 9.0.1.
         /// </summary>
         public static string Summary =>
@@ -74,11 +85,13 @@ namespace NServiceBus.Transport.SqlServer
             "(.8) MaxDispatchWave default 16 (was 64) - swept 64/32/16 at 6 nodes x concurrency 128; 16 " +
             "tied steady state, won backlog drain; suits small instances. " +
             "(.9) Self-identifies: logged at WARN once per process at startup + final counters at shutdown. " +
-            "(.10) INDEX hints pin receive to Index_RowVersion and the mover to Index_Due: auto-stats on a " +
-            "near-empty table periodically flipped the receive to TableScan+Sort, and heap deletes never " +
-            "release pages, so an empty 45k-page (352MB) heap cost 100ms/45,000 pages per receive vs " +
-            "0.5ms/8 (61% of statement CPU over 18min). Requires the transport-created indexes (schema " +
-            "check warns if absent). " +
+            "(.10/.11) INDEX hints pin the receive to the RowVersion index and the mover to the Due index: " +
+            "auto-stats on a near-empty table periodically flipped the receive to TableScan+Sort, and heap " +
+            "deletes never release pages, so an empty 45k-page (352MB) heap cost 100ms/45,000 pages per " +
+            "receive vs 0.5ms/8 (61% of statement CPU over 18min). Index names are resolved per table from " +
+            "sys.indexes by leading column on first use (Octopus names them IX_NSB_..., not the transport " +
+            "defaults); when none matches, statements stay unhinted and a WARN is logged. Kill switch: " +
+            "PlanPinningHintsEnabled. " +
             "Measured (SQL2022, concurrency 256, 100ms delay, 50ms handler; DB CPU ms/msg at 1/6/12 nodes): " +
             "steady 400/s 2.86/3.00/3.32 vs stock 3.49/5.88/6.69; 20k drain at 12 nodes 2.13 vs 6.28 at " +
             "equal throughput, receive p99 278ms -> 16ms. " +
@@ -95,7 +108,8 @@ namespace NServiceBus.Transport.SqlServer
             builder.Append("[SqlServerTransportPatch ").Append(Version).Append("] ");
             builder.Append("knobs: MaxDispatchWave=").Append(MaxDispatchWave);
             builder.Append(" HeadRescanFloor=").Append(HeadRescanFloor);
-            builder.Append(" DelayedMoverElectionEnabled=").Append(DelayedMoverElectionEnabled).Append("; ");
+            builder.Append(" DelayedMoverElectionEnabled=").Append(DelayedMoverElectionEnabled);
+            builder.Append(" PlanPinningHintsEnabled=").Append(PlanPinningHintsEnabled).Append("; ");
             TransportPatchDiagnostics.AppendSnapshot(builder);
             builder.Append(" | ").Append(Summary);
 
