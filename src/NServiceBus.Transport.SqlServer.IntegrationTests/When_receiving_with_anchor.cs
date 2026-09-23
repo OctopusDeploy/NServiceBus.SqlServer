@@ -74,7 +74,7 @@ namespace NServiceBus.Transport.SqlServer.IntegrationTests
         [Test]
         public async Task Peek_rewinds_the_anchor_to_rows_committed_behind_it()
         {
-            var anchor = new ReceiveAnchor(TimeSpan.FromHours(1));
+            var anchor = new ReceiveAnchor();
 
             using (var slowSender = await dbConnectionFactory.OpenNewConnection())
             using (var receiver = await dbConnectionFactory.OpenNewConnection())
@@ -87,7 +87,7 @@ namespace NServiceBus.Transport.SqlServer.IntegrationTests
                     await Send(slowSender, "committed-late", slowTransaction);
                     await Send(receiver, "committed-early");
 
-                    var early = await queue.TryReceive(receiver, null, anchor.GetCurrent());
+                    var early = await queue.TryReceive(receiver, null, anchor.Current);
                     Assert.That(early.Message.Headers[Headers.MessageId], Is.EqualTo("committed-early"));
                     earlyRowVersion = early.RowVersion;
                     anchor.Advance(earlyRowVersion);
@@ -95,13 +95,13 @@ namespace NServiceBus.Transport.SqlServer.IntegrationTests
                     await slowTransaction.CommitAsync();
                 }
 
-                var strandedReceive = await queue.TryReceive(receiver, null, anchor.GetCurrent());
+                var strandedReceive = await queue.TryReceive(receiver, null, anchor.Current);
                 Assert.That(strandedReceive.Successful, Is.False, "the late commit is behind the anchor");
 
                 var peek = await queue.TryPeek(receiver, null);
                 anchor.RewindToInclude(peek.LowestSequence);
 
-                var late = await queue.TryReceive(receiver, null, anchor.GetCurrent());
+                var late = await queue.TryReceive(receiver, null, anchor.Current);
 
                 Assert.Multiple(() =>
                 {

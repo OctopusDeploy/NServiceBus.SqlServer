@@ -31,9 +31,49 @@ public class MessageReceiverBackoffTests
         Assert.That(peeker.PeekCount, Is.LessThanOrEqualTo(6));
     }
 
-    static MessageReceiver CreateReceiver(CountingPeeker peeker, TimeSpan emptyBatchBackoff)
+    [Test]
+    public async Task Does_not_back_off_when_the_batch_received_messages()
     {
-        var queue = new FakeQueue();
+        // each batch receives one message and then comes up empty, ending the batch early
+        var messageAvailable = 0;
+        var queue = new FakeQueue(() => Interlocked.Exchange(ref messageAvailable, 0) == 1
+            ? MessageReadResult.Success(new Message("1", string.Empty, Array.Empty<byte>(), false))
+            : MessageReadResult.NoMessage);
+        var peeker = new CountingPeeker(onPeek: () => Interlocked.Exchange(ref messageAvailable, 1));
+        var receiver = CreateReceiver(peeker, emptyBatchBackoff: TimeSpan.FromMilliseconds(200), queue, classifier => new ReceivingStrategy(classifier));
+
+        await receiver.Initialize(new PushRuntimeSettings(1), (_, _) => Task.CompletedTask, (_, _) => Task.FromResult(ErrorHandleResult.Handled)).ConfigureAwait(false);
+        await receiver.StartReceive().ConfigureAwait(false);
+        await Task.Delay(TimeSpan.FromMilliseconds(700)).ConfigureAwait(false);
+        await receiver.StopReceive().ConfigureAwait(false);
+
+        Assert.That(peeker.PeekCount, Is.GreaterThan(20));
+    }
+
+    [Test]
+    public async Task Checks_the_anchor_during_long_batches()
+    {
+        var queue = new FakeQueue(() => MessageReadResult.Success(new Message("1", string.Empty, Array.Empty<byte>(), false)));
+        var peeker = new CountingPeeker(messageCount: int.MaxValue);
+        var receiver = CreateReceiver(peeker, emptyBatchBackoff: TimeSpan.FromMilliseconds(200), queue, classifier => new ReceivingStrategy(classifier));
+
+        await receiver.Initialize(new PushRuntimeSettings(1), (_, _) => Task.CompletedTask, (_, _) => Task.FromResult(ErrorHandleResult.Handled)).ConfigureAwait(false);
+        await receiver.StartReceive().ConfigureAwait(false);
+        await Task.Delay(TimeSpan.FromMilliseconds(1500)).ConfigureAwait(false);
+        await receiver.StopReceive().ConfigureAwait(false);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(peeker.PeekCount, Is.EqualTo(1), "the first batch never ends");
+            Assert.That(peeker.ImmediatePeekCount, Is.GreaterThanOrEqualTo(1), "the anchor is checked while the batch runs");
+        });
+    }
+
+    static MessageReceiver CreateReceiver(CountingPeeker peeker, TimeSpan emptyBatchBackoff) =>
+        CreateReceiver(peeker, emptyBatchBackoff, new FakeQueue(() => MessageReadResult.NoMessage), classifier => new EmptyReceiveStrategy(classifier));
+
+    static MessageReceiver CreateReceiver(CountingPeeker peeker, TimeSpan emptyBatchBackoff, FakeQueue queue, Func<IExceptionClassifier, ProcessStrategy> strategyFactory)
+    {
         var classifier = new SqlServerExceptionClassifier();
 
         return new MessageReceiver(
@@ -42,7 +82,7 @@ public class MessageReceiverBackoffTests
             "queue",
             "error",
             (_, _, _) => { },
-            _ => new EmptyReceiveStrategy(classifier),
+            _ => strategyFactory(classifier),
             _ => queue,
             new FakePurger(),
             peeker,
@@ -53,16 +93,27 @@ public class MessageReceiverBackoffTests
             classifier);
     }
 
-    class CountingPeeker : IPeekMessagesInQueue
+    class CountingPeeker(int messageCount = 10, Action onPeek = null) : IPeekMessagesInQueue
     {
         int peekCount;
 
+        int immediatePeekCount;
+
         public int PeekCount => Volatile.Read(ref peekCount);
+
+        public int ImmediatePeekCount => Volatile.Read(ref immediatePeekCount);
+
+        public Task<PeekResult> PeekImmediately(TableBasedQueue inputQueue, CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref immediatePeekCount);
+            return Task.FromResult(new PeekResult(messageCount, 1));
+        }
 
         public Task<PeekResult> Peek(TableBasedQueue inputQueue, RepeatedFailuresOverTimeCircuitBreaker circuitBreaker, CancellationToken cancellationToken = default)
         {
             Interlocked.Increment(ref peekCount);
-            return Task.FromResult(new PeekResult(10, 1));
+            onPeek?.Invoke();
+            return Task.FromResult(new PeekResult(messageCount, 1));
         }
     }
 
@@ -81,11 +132,24 @@ public class MessageReceiverBackoffTests
         }
     }
 
-    class FakeQueue : TableBasedQueue
+    class ReceivingStrategy(IExceptionClassifier exceptionClassifier) : ProcessStrategy(null, exceptionClassifier, null)
     {
-        public FakeQueue() : base(new SqlServerConstants(), "[dbo].[queue]", "queue", false)
+        public override async Task ProcessMessage(CancellationTokenSource stopBatchCancellationTokenSource, ReceiveCountdownEvent.Signaler receiveCountdownEventSignaler, CancellationToken cancellationToken = default)
         {
+            var receiveResult = await TryReceiveAnchored(null, null, cancellationToken).ConfigureAwait(false);
+            receiveCountdownEventSignaler.Signal();
+
+            if (receiveResult == MessageReadResult.NoMessage)
+            {
+                stopBatchCancellationTokenSource.Cancel();
+            }
         }
+    }
+
+    class FakeQueue(Func<MessageReadResult> receive) : TableBasedQueue(new SqlServerConstants(), "[dbo].[queue]", "queue", false)
+    {
+        public override Task<MessageReadResult> TryReceive(System.Data.Common.DbConnection connection, System.Data.Common.DbTransaction transaction, long anchor, CancellationToken cancellationToken = default)
+            => Task.FromResult(receive());
 
         protected override Task SendRawMessage(MessageRow message, System.Data.Common.DbConnection connection, System.Data.Common.DbTransaction transaction, CancellationToken cancellationToken = default)
             => Task.CompletedTask;

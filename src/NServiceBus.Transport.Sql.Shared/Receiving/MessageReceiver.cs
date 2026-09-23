@@ -1,6 +1,7 @@
 namespace NServiceBus.Transport.Sql.Shared
 {
     using System;
+    using System.Diagnostics;
     using System.Threading;
     using System.Threading.Tasks;
     using Logging;
@@ -30,12 +31,6 @@ namespace NServiceBus.Transport.Sql.Shared
             this.queuePeeker = queuePeeker;
             this.waitTimeCircuitBreaker = waitTimeCircuitBreaker;
             this.emptyBatchBackoff = emptyBatchBackoff;
-            // The head rescan is the expensive from-head receive that picks up messages which
-            // reappeared behind the anchor (e.g. rolled back on another instance). Its interval
-            // trades that pickup latency against paying the old contended head-scan cost, so it
-            // must not shrink with an aggressively tuned peek delay (e.g. 100ms) — floor it at 1s.
-            var headRescanInterval = emptyBatchBackoff > MinimumHeadRescanInterval ? emptyBatchBackoff : MinimumHeadRescanInterval;
-            receiveAnchor = new ReceiveAnchor(headRescanInterval);
             this.errorQueueAddress = errorQueueAddress;
             this.criticalErrorAction = criticalErrorAction;
             this.purgeAllMessagesOnStartup = purgeAllMessagesOnStartup;
@@ -192,16 +187,15 @@ namespace NServiceBus.Transport.Sql.Shared
 
         async Task ReceiveMessages(CancellationToken messageReceivingCancellationToken)
         {
-            if (lastBatchCancellationSource != null && lastBatchCancellationSource.IsCancellationRequested)
+            if (previousBatchReceivedCount.HasValue && processStrategy.ReceivedCount == previousBatchReceivedCount)
             {
-                lastBatchCancellationSource = null;
-
-                // A receive in the previous batch found the queue empty even though the peek saw
-                // messages — competing instances consumed them first. Back off like an empty peek
-                // instead of re-peeking immediately, otherwise every message arrival sends all
-                // instances into a hot peek/receive loop against the same queue table.
+                // The peek saw messages but the whole batch received none; competing instances
+                // consumed them first. Back off like an empty peek so instances don't re-peek in a
+                // tight loop against the same queue table.
                 await Task.Delay(emptyBatchBackoff, messageReceivingCancellationToken).ConfigureAwait(false);
             }
+
+            previousBatchReceivedCount = null;
 
             var peekResult = await queuePeeker
                 .Peek(inputQueue, messageReceivingCircuitBreaker, messageReceivingCancellationToken)
@@ -214,12 +208,13 @@ namespace NServiceBus.Transport.Sql.Shared
             }
 
             receiveAnchor.RewindToInclude(peekResult.LowestSequence);
+            lastAnchorCheck = Stopwatch.GetTimestamp();
+            previousBatchReceivedCount = processStrategy.ReceivedCount;
 
             messageReceivingCancellationToken.ThrowIfCancellationRequested();
 
             // We cannot dispose this token source because of potential race conditions of concurrent processing
             var stopBatchCancellationSource = new CancellationTokenSource();
-            lastBatchCancellationSource = stopBatchCancellationSource;
 
             // If either the receiving or processing circuit breakers are triggered, start only one message processing task at a time.
             var maximumConcurrentProcessing =
@@ -235,6 +230,14 @@ namespace NServiceBus.Transport.Sql.Shared
                     break;
                 }
 
+                if (Stopwatch.GetElapsedTime(lastAnchorCheck) >= AnchorCheckInterval
+                    && Interlocked.CompareExchange(ref anchorCheckRunning, 1, 0) == 0)
+                {
+                    lastAnchorCheck = Stopwatch.GetTimestamp();
+                    // not awaited so receives keep starting while the peek runs
+                    _ = RewindAnchorToStrandedRows(messageReceivingCancellationToken);
+                }
+
                 var localConcurrencyLimiter = concurrencyLimiter;
 
                 await localConcurrencyLimiter.WaitAsync(messageReceivingCancellationToken).ConfigureAwait(false);
@@ -245,6 +248,33 @@ namespace NServiceBus.Transport.Sql.Shared
 
             // Wait for all receive operations to complete before returning (and thus peeking again)
             await receiveLatch.WaitAsync(stopBatchCancellationSource.Token).ConfigureAwait(false);
+        }
+
+        // A large backlog makes for a long batch; peek periodically during it so rows that became
+        // visible behind the anchor don't wait for the batch to end.
+        async Task RewindAnchorToStrandedRows(CancellationToken cancellationToken)
+        {
+            try
+            {
+                // opening the connection inside a TransactionScope can block synchronously
+                await Task.Yield();
+
+                var peekResult = await queuePeeker.PeekImmediately(inputQueue, cancellationToken).ConfigureAwait(false);
+                receiveAnchor.RewindToInclude(peekResult.LowestSequence);
+            }
+            catch (Exception ex) when (!exceptionClassifier.IsOperationCancelled(ex, cancellationToken))
+            {
+                // best effort; the peek before the next batch checks again
+                Logger.Debug("Failed to check the receive anchor for stranded rows.", ex);
+            }
+            catch (Exception ex) when (exceptionClassifier.IsOperationCancelled(ex, cancellationToken))
+            {
+                // receiver is stopping
+            }
+            finally
+            {
+                Interlocked.Exchange(ref anchorCheckRunning, 0);
+            }
         }
 
         async Task ProcessMessagesSwallowExceptionsAndReleaseConcurrencyLimiter(
@@ -301,9 +331,11 @@ namespace NServiceBus.Transport.Sql.Shared
         readonly IExceptionClassifier exceptionClassifier;
         TimeSpan waitTimeCircuitBreaker;
         readonly TimeSpan emptyBatchBackoff;
-        static readonly TimeSpan MinimumHeadRescanInterval = TimeSpan.FromSeconds(1);
-        readonly ReceiveAnchor receiveAnchor;
-        CancellationTokenSource lastBatchCancellationSource;
+        static readonly TimeSpan AnchorCheckInterval = TimeSpan.FromSeconds(1);
+        readonly ReceiveAnchor receiveAnchor = new();
+        long? previousBatchReceivedCount;
+        long lastAnchorCheck;
+        int anchorCheckRunning;
         volatile SemaphoreSlim concurrencyLimiter;
         CancellationTokenSource messageReceivingCancellationTokenSource;
         CancellationTokenSource messageProcessingCancellationTokenSource;
