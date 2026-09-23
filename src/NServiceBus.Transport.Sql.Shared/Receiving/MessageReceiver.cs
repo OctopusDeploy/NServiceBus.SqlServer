@@ -203,14 +203,17 @@ namespace NServiceBus.Transport.Sql.Shared
                 await Task.Delay(emptyBatchBackoff, messageReceivingCancellationToken).ConfigureAwait(false);
             }
 
-            var messageCount = await queuePeeker
+            var peekResult = await queuePeeker
                 .Peek(inputQueue, messageReceivingCircuitBreaker, messageReceivingCancellationToken)
                 .ConfigureAwait(false);
 
+            var messageCount = peekResult.MessageCount;
             if (messageCount == 0)
             {
                 return;
             }
+
+            receiveAnchor.RewindToInclude(peekResult.LowestSequence);
 
             messageReceivingCancellationToken.ThrowIfCancellationRequested();
 

@@ -8,9 +8,9 @@ namespace NServiceBus.Transport.Sql.Shared
     /// receive queries can seek past the contended head of the queue index. The head accumulates
     /// other receivers' in-flight (locked, delete-pending) rows and ghost records of recently
     /// deleted rows; scanning over it makes every receive more expensive as more competing
-    /// instances are added. Periodically the anchor forces a scan from the head so messages that
-    /// reappeared behind it (for example rolled back on another instance) are picked up within
-    /// <c>headRescanInterval</c>.
+    /// instances are added. Rows can become visible behind the anchor (committed late by a sender,
+    /// or rolled back on another instance); each peek rewinds the anchor to the lowest visible row,
+    /// and a periodic scan from the head every <c>headRescanInterval</c> acts as a backstop.
     /// </summary>
     class ReceiveAnchor
     {
@@ -52,6 +52,33 @@ namespace NServiceBus.Transport.Sql.Shared
         }
 
         public void Reset() => Interlocked.Exchange(ref value, 0);
+
+        /// <summary>
+        /// Moves the anchor back so the next seek includes <paramref name="lowestVisible"/>, the lowest
+        /// unlocked row the peek saw. Row versions are allocated on insert but become visible on
+        /// commit, so a sender's long-running transaction can commit a row behind rows this
+        /// receiver has already consumed.
+        /// </summary>
+        public void RewindToInclude(long lowestVisible)
+        {
+            if (lowestVisible <= 0)
+            {
+                return;
+            }
+
+            var target = lowestVisible - 1;
+            var current = Interlocked.Read(ref value);
+            while (current > target)
+            {
+                var witnessed = Interlocked.CompareExchange(ref value, target, current);
+                if (witnessed == current)
+                {
+                    break;
+                }
+
+                current = witnessed;
+            }
+        }
 
         /// <summary>
         /// Gates the empty-receive fallback scan from the head of the queue. With wide processing

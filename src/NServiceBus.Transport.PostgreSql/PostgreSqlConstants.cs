@@ -68,8 +68,10 @@ FROM {0}
 ORDER BY Due LIMIT 1 FOR UPDATE SKIP LOCKED";
 
     public string PeekText { get; set; } = @"
-SELECT COALESCE(cast((SELECT seq FROM {0} ORDER BY seq DESC LIMIT 1 FOR UPDATE SKIP LOCKED) 
-- (SELECT seq FROM {0} ORDER BY seq ASC LIMIT 1 FOR UPDATE SKIP LOCKED) + 1 AS int), 0);";
+WITH lowest AS (SELECT seq FROM {0} ORDER BY seq ASC LIMIT 1 FOR UPDATE SKIP LOCKED),
+highest AS (SELECT seq FROM {0} ORDER BY seq DESC LIMIT 1 FOR UPDATE SKIP LOCKED)
+SELECT COALESCE(cast((SELECT seq FROM highest) - (SELECT seq FROM lowest) + 1 AS int), 0),
+    COALESCE((SELECT seq FROM lowest), 0)::bigint;";
 
     public string AddMessageBodyStringColumn { get; set; } = @"
 DO $$

@@ -27,6 +27,29 @@ public class ReceiveAnchorTests
     }
 
     [Test]
+    public void Rewinds_to_include_a_lower_visible_row()
+    {
+        var anchor = new ReceiveAnchor(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+
+        anchor.Advance(10);
+        anchor.RewindToInclude(7);
+
+        Assert.That(anchor.GetCurrent(), Is.EqualTo(6));
+    }
+
+    [TestCase(0)]
+    [TestCase(11)]
+    public void Does_not_move_forward_on_rewind(long lowestVisible)
+    {
+        var anchor = new ReceiveAnchor(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+
+        anchor.Advance(10);
+        anchor.RewindToInclude(lowestVisible);
+
+        Assert.That(anchor.GetCurrent(), Is.EqualTo(10));
+    }
+
+    [Test]
     public void Reset_moves_back_to_the_head()
     {
         var anchor = new ReceiveAnchor(TimeSpan.FromSeconds(1), new FakeTimeProvider());

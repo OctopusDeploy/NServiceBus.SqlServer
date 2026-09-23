@@ -23,7 +23,7 @@ namespace NServiceBus.Transport.Sql.Shared
             this.isStreamSupported = isStreamSupported;
         }
 
-        public virtual async Task<int> TryPeek(DbConnection connection, DbTransaction transaction, int? timeoutInSeconds = null, CancellationToken cancellationToken = default)
+        public virtual async Task<PeekResult> TryPeek(DbConnection connection, DbTransaction transaction, int? timeoutInSeconds = null, CancellationToken cancellationToken = default)
         {
             using (var command = connection.CreateCommand())
             {
@@ -32,8 +32,16 @@ namespace NServiceBus.Transport.Sql.Shared
                 command.Transaction = transaction;
                 command.CommandText = peekCommand;
 
-                var numberOfMessages = await command.ExecuteScalarAsyncOrDefault<int>(nameof(peekCommand), msg => log.Warn(msg), cancellationToken).ConfigureAwait(false);
-                return numberOfMessages;
+                using (var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false))
+                {
+                    if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                    {
+                        log.Warn($"{nameof(peekCommand)} returned no rows.");
+                        return PeekResult.Empty;
+                    }
+
+                    return new PeekResult(reader.GetInt32(0), reader.GetInt64(1));
+                }
             }
         }
 
