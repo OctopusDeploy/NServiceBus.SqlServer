@@ -6,9 +6,8 @@ namespace NServiceBus.Transport.Sql.Shared
     using System.Threading.Tasks;
 
     /// <summary>
-    /// A single receive handed to a <see cref="ProcessStrategy"/> by the receive loop. The strategy
-    /// supplies the connection and transaction; the attempt owns the anchored query and reports
-    /// back to the loop (the receive latch, the batch backoff and stopping an empty batch).
+    /// A single receive handed to a <see cref="ProcessStrategy"/> by the receive loop.
+    /// Owns the anchored query and reports back to the loop (the receive latch, the batch backoff and stopping an empty batch).
     /// </summary>
     sealed class ReceiveAttempt(TableBasedQueue inputQueue, ReceiveState receiveState, ReceiveCountdownEvent.Signaler receiveCountdownEventSignaler, CancellationTokenSource stopBatchCancellationTokenSource)
     {
@@ -18,14 +17,13 @@ namespace NServiceBus.Transport.Sql.Shared
             {
                 throw new InvalidOperationException("A receive attempt can only receive once.");
             }
-
             receiveStarted = true;
 
             var receiveResult = await TryReceiveAnchored(connection, transaction, cancellationToken).ConfigureAwait(false);
 
             if (receiveResult != MessageReadResult.NoMessage)
             {
-                ReceivedRow = true;
+                receivedRowVersion = receiveResult.RowVersion;
                 receiveState.MarkReceived();
             }
 
@@ -40,10 +38,29 @@ namespace NServiceBus.Transport.Sql.Shared
         }
 
         /// <summary>
-        /// Whether the receive returned a message or poison row, i.e. whether a failure afterwards
-        /// leaves a row visible at the head of the queue again.
+        /// Moves the anchor according to what happened to the received row.
         /// </summary>
-        public bool ReceivedRow { get; private set; }
+        public void Settle(ProcessOutcome outcome)
+        {
+            if (receivedRowVersion is not { } rowVersion)
+            {
+                // Nothing received - no matter the reported outcome, do nothing
+                return;
+            }
+
+            switch (outcome)
+            {
+                case ProcessOutcome.Committed:
+                    receiveState.AdvanceAnchor(rowVersion);
+                    break;
+                case ProcessOutcome.RolledBack:
+                    receiveState.RetreatAnchor(rowVersion);
+                    break;
+                case ProcessOutcome.NoMessage:
+                default:
+                    break;
+            }
+        }
 
         /// <summary>
         /// Receives seeking past the anchor (the contended head region of the queue: other
@@ -59,7 +76,7 @@ namespace NServiceBus.Transport.Sql.Shared
             var anchor = receiveState.GetAnchor();
             var receiveResult = await inputQueue.TryReceive(connection, transaction, anchor, cancellationToken).ConfigureAwait(false);
 
-            if (!receiveResult.Successful && !receiveResult.IsPoison && anchor > 0 && receiveState.TryEnterHeadScan())
+            if (receiveResult is { Successful: false, IsPoison: false } && anchor > 0 && receiveState.TryEnterHeadScan())
             {
                 try
                 {
@@ -75,5 +92,6 @@ namespace NServiceBus.Transport.Sql.Shared
         }
 
         bool receiveStarted;
+        long? receivedRowVersion;
     }
 }

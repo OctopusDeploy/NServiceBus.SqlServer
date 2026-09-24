@@ -100,7 +100,7 @@ public class MessageReceiverBackoffTests
 
             return receiveResult == MessageReadResult.NoMessage
                 ? ProcessOutcome.NoMessage
-                : ProcessOutcome.Committed(receiveResult.RowVersion);
+                : ProcessOutcome.Committed;
         }
     }
 

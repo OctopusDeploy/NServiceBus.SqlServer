@@ -54,21 +54,22 @@ namespace NServiceBus.Transport.Sql.Shared
             }
         }
 
-        public void ResetAnchor() => Interlocked.Exchange(ref anchor, 0);
-
-        public void Apply(ProcessOutcome outcome)
+        /// <summary>
+        /// Moves the anchor back to just before a row that rolled back, so we rescan a failed row
+        /// </summary>
+        public void RetreatAnchor(long rowVersion)
         {
-            switch (outcome.Kind)
+            var target = rowVersion - 1;
+            var current = Interlocked.Read(ref anchor);
+            while (target < current)
             {
-                case ProcessOutcomeKind.Committed:
-                    AdvanceAnchor(outcome.RowVersion);
+                var witnessed = Interlocked.CompareExchange(ref anchor, target, current);
+                if (witnessed == current)
+                {
                     break;
-                case ProcessOutcomeKind.RolledBack:
-                    ResetAnchor();
-                    break;
-                case ProcessOutcomeKind.NoMessage:
-                default:
-                    break;
+                }
+
+                current = witnessed;
             }
         }
 
@@ -79,16 +80,13 @@ namespace NServiceBus.Transport.Sql.Shared
         /// it and the rest report no message.
         /// </summary>
         public bool TryEnterHeadScan() => Interlocked.CompareExchange(ref headScanActive, 1, 0) == 0;
-
         public void ExitHeadScan() => Interlocked.Exchange(ref headScanActive, 0);
 
-        public void MarkReceived() => Interlocked.Exchange(ref receivedInBatch, 1);
-
         /// <summary>
-        /// Starts a new receive batch and reports whether the previous one received anything, so
-        /// the receive loop can back off when a whole batch came up empty.
+        /// Starts a new "receive" batch and returns true if the previous batch received anything
         /// </summary>
         public bool BeginBatch() => Interlocked.Exchange(ref receivedInBatch, 0) == 1;
+        public void MarkReceived() => Interlocked.Exchange(ref receivedInBatch, 1);
 
         readonly TimeProvider timeProvider;
         readonly TimeSpan headRescanInterval;

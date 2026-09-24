@@ -249,7 +249,7 @@
 
                     var outcome = await processStrategy.ProcessMessage(receiveAttempt, messageProcessingCancellationToken)
                         .ConfigureAwait(false);
-                    receiveState.Apply(outcome);
+                    receiveAttempt.Settle(outcome);
 
                     messageProcessingCircuitBreaker.Success();
                 }
@@ -257,12 +257,8 @@
                 {
                     Logger.Warn("Message processing failed", ex);
 
-                    if (receiveAttempt.ReceivedRow)
-                    {
-                        // If we're in here, a row was received and not processed - which is identical to rolling back.
-                        // If we didn't land in here, no row was found and so there's no anchor state to roll back
-                        receiveState.Apply(ProcessOutcome.RolledBack);
-                    }
+                    // a received row that was not processed has rolled back; with no row received there is nothing to settle
+                    receiveAttempt.Settle(ProcessOutcome.RolledBack);
 
                     if (!exceptionClassifier.IsDeadlockException(ex))
                     {

@@ -12,7 +12,6 @@
         public override async Task<ProcessOutcome> ProcessMessage(ReceiveAttempt receiveAttempt, CancellationToken cancellationToken = default)
         {
             Message message = null;
-            MessageReadResult receiveResult;
             var context = new ContextBag();
 
             try
@@ -20,7 +19,7 @@
                 using (var scope = new TransactionScope(TransactionScopeOption.RequiresNew, transactionOptions, TransactionScopeAsyncFlowOption.Enabled))
                 using (var connection = await connectionFactory.OpenNewConnection(cancellationToken).ConfigureAwait(false))
                 {
-                    receiveResult = await receiveAttempt.Receive(connection, null, cancellationToken).ConfigureAwait(false);
+                    var receiveResult = await receiveAttempt.Receive(connection, null, cancellationToken).ConfigureAwait(false);
 
                     if (receiveResult == MessageReadResult.NoMessage)
                     {
@@ -31,7 +30,7 @@
                     {
                         await ErrorQueue.DeadLetter(receiveResult.PoisonMessage, connection, null, cancellationToken).ConfigureAwait(false);
                         scope.Complete();
-                        return ProcessOutcome.Committed(receiveResult.RowVersion);
+                        return ProcessOutcome.Committed;
                     }
 
                     message = receiveResult.Message;
@@ -39,7 +38,7 @@
                     if (await TryHandleDelayedMessage(receiveResult.Message, connection, null, cancellationToken).ConfigureAwait(false))
                     {
                         scope.Complete();
-                        return ProcessOutcome.Committed(receiveResult.RowVersion);
+                        return ProcessOutcome.Committed;
                     }
 
                     connection.Close();
@@ -53,7 +52,7 @@
                 }
 
                 failureInfoStorage.ClearFailureInfoForMessage(message.TransportId);
-                return ProcessOutcome.Committed(receiveResult.RowVersion);
+                return ProcessOutcome.Committed;
             }
             catch (Exception ex) when (!exceptionClassifier.IsOperationCancelled(ex, cancellationToken))
             {

@@ -14,7 +14,6 @@ namespace NServiceBus.Transport.Sql.Shared
         public override async Task<ProcessOutcome> ProcessMessage(ReceiveAttempt receiveAttempt, CancellationToken cancellationToken = default)
         {
             Message message = null;
-            MessageReadResult receiveResult;
             var context = new ContextBag();
 
             try
@@ -22,7 +21,7 @@ namespace NServiceBus.Transport.Sql.Shared
                 using (var connection = await connectionFactory.OpenNewConnection(cancellationToken).ConfigureAwait(false))
                 using (var transaction = connection.BeginTransaction(isolationLevel))
                 {
-                    receiveResult = await receiveAttempt.Receive(connection, transaction, cancellationToken).ConfigureAwait(false);
+                    var receiveResult = await receiveAttempt.Receive(connection, transaction, cancellationToken).ConfigureAwait(false);
 
                     if (receiveResult == MessageReadResult.NoMessage)
                     {
@@ -33,7 +32,7 @@ namespace NServiceBus.Transport.Sql.Shared
                     {
                         await ErrorQueue.DeadLetter(receiveResult.PoisonMessage, connection, transaction, cancellationToken).ConfigureAwait(false);
                         transaction.Commit();
-                        return ProcessOutcome.Committed(receiveResult.RowVersion);
+                        return ProcessOutcome.Committed;
                     }
 
                     message = receiveResult.Message;
@@ -41,7 +40,7 @@ namespace NServiceBus.Transport.Sql.Shared
                     if (await TryHandleDelayedMessage(receiveResult.Message, connection, transaction, cancellationToken).ConfigureAwait(false))
                     {
                         transaction.Commit();
-                        return ProcessOutcome.Committed(receiveResult.RowVersion);
+                        return ProcessOutcome.Committed;
                     }
 
                     var transportTransaction = transactionForReceiveOnly
@@ -58,7 +57,7 @@ namespace NServiceBus.Transport.Sql.Shared
                 }
 
                 failureInfoStorage.ClearFailureInfoForMessage(message.TransportId);
-                return ProcessOutcome.Committed(receiveResult.RowVersion);
+                return ProcessOutcome.Committed;
             }
             catch (Exception ex) when (!exceptionClassifier.IsOperationCancelled(ex, cancellationToken))
             {

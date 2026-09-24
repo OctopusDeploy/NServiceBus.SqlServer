@@ -27,14 +27,26 @@ public class ReceiveStateTests
     }
 
     [Test]
-    public void Reset_moves_back_to_the_head()
+    public void Retreats_to_just_before_a_rolled_back_row()
     {
         var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
 
         state.AdvanceAnchor(10);
-        state.ResetAnchor();
+        state.RetreatAnchor(7);
 
-        Assert.That(state.GetAnchor(), Is.EqualTo(0));
+        // anchored receives seek strictly past the anchor, so row 7 is visible again
+        Assert.That(state.GetAnchor(), Is.EqualTo(6));
+    }
+
+    [Test]
+    public void Retreating_never_moves_the_anchor_forward()
+    {
+        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+
+        state.AdvanceAnchor(5);
+        state.RetreatAnchor(10); // the rolled back row is already past the anchor
+
+        Assert.That(state.GetAnchor(), Is.EqualTo(5));
     }
 
     [Test]
@@ -113,37 +125,5 @@ public class ReceiveStateTests
             Assert.That(state.BeginBatch(), Is.True, "previous batch received a message");
             Assert.That(state.BeginBatch(), Is.False, "starting a batch clears the flag");
         });
-    }
-
-    [Test]
-    public void Applying_a_committed_outcome_advances_the_anchor()
-    {
-        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
-
-        state.Apply(ProcessOutcome.Committed(10));
-
-        Assert.That(state.GetAnchor(), Is.EqualTo(10));
-    }
-
-    [Test]
-    public void Applying_a_rolled_back_outcome_moves_back_to_the_head()
-    {
-        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
-        state.AdvanceAnchor(10);
-
-        state.Apply(ProcessOutcome.RolledBack);
-
-        Assert.That(state.GetAnchor(), Is.EqualTo(0));
-    }
-
-    [Test]
-    public void Applying_a_no_message_outcome_keeps_the_anchor()
-    {
-        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
-        state.AdvanceAnchor(10);
-
-        state.Apply(ProcessOutcome.NoMessage);
-
-        Assert.That(state.GetAnchor(), Is.EqualTo(10));
     }
 }

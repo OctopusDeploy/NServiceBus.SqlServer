@@ -26,7 +26,6 @@ public class ReceiveAttemptTests
             Assert.That(latch.WaitAsync(CancellationToken).IsCompleted, Is.True, "latch signalled");
             Assert.That(stopBatch.IsCancellationRequested, Is.True, "empty receive stops the batch");
             Assert.That(state.BeginBatch(), Is.False, "nothing received");
-            Assert.That(attempt.ReceivedRow, Is.False);
         });
     }
 
@@ -47,7 +46,6 @@ public class ReceiveAttemptTests
             Assert.That(latch.WaitAsync(CancellationToken).IsCompleted, Is.True, "latch signalled");
             Assert.That(stopBatch.IsCancellationRequested, Is.False, "batch continues");
             Assert.That(state.BeginBatch(), Is.True, "message received");
-            Assert.That(attempt.ReceivedRow, Is.True);
         });
     }
 
@@ -61,6 +59,49 @@ public class ReceiveAttemptTests
 
         Assert.ThrowsAsync<InvalidOperationException>(() => attempt.Receive(null, null, CancellationToken));
     }
+
+    [Test]
+    public async Task Committing_advances_the_anchor_to_the_received_row()
+    {
+        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+        var attempt = CreateAttempt(state, MessageReadResult.Success(CreateMessage(), 10));
+
+        _ = await attempt.Receive(null, null, CancellationToken).ConfigureAwait(false);
+        attempt.Settle(ProcessOutcome.Committed);
+
+        Assert.That(state.GetAnchor(), Is.EqualTo(10));
+    }
+
+    [Test]
+    public async Task Rolling_back_retreats_the_anchor_to_the_received_row()
+    {
+        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+        var attempt = CreateAttempt(state, MessageReadResult.Success(CreateMessage(), 7));
+
+        _ = await attempt.Receive(null, null, CancellationToken).ConfigureAwait(false);
+        state.AdvanceAnchor(10); // a concurrent receive committed a later row
+        attempt.Settle(ProcessOutcome.RolledBack);
+
+        Assert.That(state.GetAnchor(), Is.EqualTo(6));
+    }
+
+    [Test]
+    public void Settling_without_a_received_row_keeps_the_anchor()
+    {
+        // e.g. the receive query itself failed (a deadlock victim) and consumed nothing
+        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+        state.AdvanceAnchor(10);
+        var attempt = CreateAttempt(state, MessageReadResult.NoMessage);
+
+        attempt.Settle(ProcessOutcome.RolledBack);
+
+        Assert.That(state.GetAnchor(), Is.EqualTo(10));
+    }
+
+    static ReceiveAttempt CreateAttempt(ReceiveState state, MessageReadResult result) =>
+        new(new FakeQueue(result), state, new ReceiveCountdownEvent(1).GetSignaler(), new CancellationTokenSource());
+
+    static Message CreateMessage() => new("1", string.Empty, Array.Empty<byte>(), false);
 
     static CancellationToken CancellationToken => TestContext.CurrentContext.CancellationToken;
 
