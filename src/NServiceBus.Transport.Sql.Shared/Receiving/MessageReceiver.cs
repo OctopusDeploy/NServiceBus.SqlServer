@@ -192,16 +192,15 @@ namespace NServiceBus.Transport.Sql.Shared
 
         async Task ReceiveMessages(CancellationToken messageReceivingCancellationToken)
         {
-            if (lastBatchCancellationSource != null && lastBatchCancellationSource.IsCancellationRequested)
+            if (previousBatchReceivedCount.HasValue && processStrategy.ReceivedCount == previousBatchReceivedCount)
             {
-                lastBatchCancellationSource = null;
-
-                // A receive in the previous batch found the queue empty even though the peek saw
-                // messages — competing instances consumed them first. Back off like an empty peek
-                // instead of re-peeking immediately, otherwise every message arrival sends all
-                // instances into a hot peek/receive loop against the same queue table.
+                // The peek saw messages but the whole batch received none; competing instances
+                // consumed them first. Back off like an empty peek so instances don't re-peek in a
+                // tight loop against the same queue table.
                 await Task.Delay(emptyBatchBackoff, messageReceivingCancellationToken).ConfigureAwait(false);
             }
+
+            previousBatchReceivedCount = null;
 
             var messageCount = await queuePeeker
                 .Peek(inputQueue, messageReceivingCircuitBreaker, messageReceivingCancellationToken)
@@ -212,11 +211,12 @@ namespace NServiceBus.Transport.Sql.Shared
                 return;
             }
 
+            previousBatchReceivedCount = processStrategy.ReceivedCount;
+
             messageReceivingCancellationToken.ThrowIfCancellationRequested();
 
             // We cannot dispose this token source because of potential race conditions of concurrent processing
             var stopBatchCancellationSource = new CancellationTokenSource();
-            lastBatchCancellationSource = stopBatchCancellationSource;
 
             // If either the receiving or processing circuit breakers are triggered, start only one message processing task at a time.
             var maximumConcurrentProcessing =
@@ -300,7 +300,7 @@ namespace NServiceBus.Transport.Sql.Shared
         readonly TimeSpan emptyBatchBackoff;
         static readonly TimeSpan MinimumHeadRescanInterval = TimeSpan.FromSeconds(1);
         readonly ReceiveAnchor receiveAnchor;
-        CancellationTokenSource lastBatchCancellationSource;
+        long? previousBatchReceivedCount;
         volatile SemaphoreSlim concurrencyLimiter;
         CancellationTokenSource messageReceivingCancellationTokenSource;
         CancellationTokenSource messageProcessingCancellationTokenSource;

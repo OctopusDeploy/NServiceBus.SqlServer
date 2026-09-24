@@ -71,11 +71,44 @@ namespace NServiceBus.Transport.SqlServer.IntegrationTests
             }
         }
 
-        async Task Send(System.Data.Common.DbConnection connection, string messageId, CancellationToken cancellationToken = default)
+        [Test]
+        public async Task Head_rescan_finds_rows_committed_behind_the_anchor()
+        {
+            using (var slowSender = await dbConnectionFactory.OpenNewConnection())
+            using (var receiver = await dbConnectionFactory.OpenNewConnection())
+            {
+                long earlyRowVersion;
+
+                // the slow sender is allocated the lower row version but commits last
+                using (var slowTransaction = slowSender.BeginTransaction())
+                {
+                    await Send(slowSender, "committed-late", slowTransaction);
+                    await Send(receiver, "committed-early");
+
+                    var early = await queue.TryReceive(receiver, null, 0);
+                    Assert.That(early.Message.Headers[Headers.MessageId], Is.EqualTo("committed-early"));
+                    earlyRowVersion = early.RowVersion;
+
+                    await slowTransaction.CommitAsync();
+                }
+
+                var anchoredReceive = await queue.TryReceive(receiver, null, earlyRowVersion);
+                var late = await queue.TryReceive(receiver, null, 0);
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(anchoredReceive.Successful, Is.False, "the late commit is behind the anchor");
+                    Assert.That(late.Message.Headers[Headers.MessageId], Is.EqualTo("committed-late"));
+                    Assert.That(late.RowVersion, Is.LessThan(earlyRowVersion));
+                });
+            }
+        }
+
+        async Task Send(System.Data.Common.DbConnection connection, string messageId, System.Data.Common.DbTransaction transaction = null, CancellationToken cancellationToken = default)
         {
             var headers = new System.Collections.Generic.Dictionary<string, string> { [Headers.MessageId] = messageId };
             var message = new OutgoingMessage(messageId, headers, new byte[0]);
-            await queue.Send(message, TimeSpan.MaxValue, connection, null, cancellationToken);
+            await queue.Send(message, TimeSpan.MaxValue, connection, transaction, cancellationToken);
         }
 
         [SetUp]

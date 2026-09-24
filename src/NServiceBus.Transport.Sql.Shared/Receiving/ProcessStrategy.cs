@@ -41,6 +41,12 @@ namespace NServiceBus.Transport.Sql.Shared
             ReceiveCountdownEvent.Signaler receiveCountdownEventSignaler, CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Total receives that returned a row (including poison messages), used by the receiver to
+        /// tell whether a batch found anything.
+        /// </summary>
+        public long ReceivedCount => Interlocked.Read(ref receivedCount);
+
+        /// <summary>
         /// Receives seeking past the anchor (the contended head region of the queue: other
         /// instances' locked in-flight rows and remains of recently consumed rows). When nothing
         /// is found past the anchor, rescans once from the head so messages that reappeared
@@ -64,6 +70,11 @@ namespace NServiceBus.Transport.Sql.Shared
                 {
                     Anchor.ExitHeadScan();
                 }
+            }
+
+            if (receiveResult != MessageReadResult.NoMessage)
+            {
+                Interlocked.Increment(ref receivedCount);
             }
 
             return receiveResult;
@@ -159,6 +170,7 @@ namespace NServiceBus.Transport.Sql.Shared
         readonly IExceptionClassifier exceptionClassifier;
         readonly FailureInfoStorage failureInfoStorage;
         Action<string, Exception, CancellationToken> criticalError;
+        long receivedCount;
         protected ILog log;
     }
 }
