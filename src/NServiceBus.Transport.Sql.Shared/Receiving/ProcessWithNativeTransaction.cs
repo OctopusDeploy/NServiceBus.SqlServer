@@ -35,7 +35,7 @@ namespace NServiceBus.Transport.Sql.Shared
                     {
                         await ErrorQueue.DeadLetter(receiveResult.PoisonMessage, connection, transaction, cancellationToken).ConfigureAwait(false);
                         transaction.Commit();
-                        Anchor.Advance(receiveResult.RowVersion);
+                        ReceiveState.AdvanceAnchor(receiveResult.RowVersion);
                         return;
                     }
 
@@ -44,7 +44,7 @@ namespace NServiceBus.Transport.Sql.Shared
                     if (await TryHandleDelayedMessage(receiveResult.Message, connection, transaction, cancellationToken).ConfigureAwait(false))
                     {
                         transaction.Commit();
-                        Anchor.Advance(receiveResult.RowVersion);
+                        ReceiveState.AdvanceAnchor(receiveResult.RowVersion);
                         return;
                     }
 
@@ -57,12 +57,12 @@ namespace NServiceBus.Transport.Sql.Shared
                         transaction.Rollback();
                         // the message is visible at the head of the queue again; rescan from the
                         // head so the immediate retry finds it
-                        Anchor.Reset();
+                        ReceiveState.ResetAnchor();
                         return;
                     }
 
                     transaction.Commit();
-                    Anchor.Advance(receiveResult.RowVersion);
+                    ReceiveState.AdvanceAnchor(receiveResult.RowVersion);
                 }
 
                 failureInfoStorage.ClearFailureInfoForMessage(message.TransportId);
@@ -75,7 +75,7 @@ namespace NServiceBus.Transport.Sql.Shared
                 }
                 failureInfoStorage.RecordFailureInfoForMessage(message.TransportId, ex, context);
                 // the receive transaction rolled back and the message is visible again
-                Anchor.Reset();
+                ReceiveState.ResetAnchor();
             }
         }
 

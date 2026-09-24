@@ -33,7 +33,7 @@
                     {
                         await ErrorQueue.DeadLetter(receiveResult.PoisonMessage, connection, null, cancellationToken).ConfigureAwait(false);
                         scope.Complete();
-                        Anchor.Advance(receiveResult.RowVersion);
+                        ReceiveState.AdvanceAnchor(receiveResult.RowVersion);
                         return;
                     }
 
@@ -42,7 +42,7 @@
                     if (await TryHandleDelayedMessage(receiveResult.Message, connection, null, cancellationToken).ConfigureAwait(false))
                     {
                         scope.Complete();
-                        Anchor.Advance(receiveResult.RowVersion);
+                        ReceiveState.AdvanceAnchor(receiveResult.RowVersion);
                         return;
                     }
 
@@ -52,12 +52,12 @@
                     {
                         // the message is visible at the head of the queue again once the scope
                         // rolls back; rescan from the head so the immediate retry finds it
-                        Anchor.Reset();
+                        ReceiveState.ResetAnchor();
                         return;
                     }
 
                     scope.Complete();
-                    Anchor.Advance(receiveResult.RowVersion);
+                    ReceiveState.AdvanceAnchor(receiveResult.RowVersion);
                 }
 
                 failureInfoStorage.ClearFailureInfoForMessage(message.TransportId);
@@ -70,7 +70,7 @@
                 }
                 failureInfoStorage.RecordFailureInfoForMessage(message.TransportId, ex, context);
                 // the receive transaction rolled back and the message is visible again
-                Anchor.Reset();
+                ReceiveState.ResetAnchor();
             }
         }
 

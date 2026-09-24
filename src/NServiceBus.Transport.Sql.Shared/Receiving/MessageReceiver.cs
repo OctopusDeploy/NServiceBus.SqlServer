@@ -30,7 +30,7 @@
             this.queuePeeker = queuePeeker;
             this.waitTimeCircuitBreaker = waitTimeCircuitBreaker;
             var headRescanInterval = emptyBatchBackoff > MinimumHeadRescanInterval ? emptyBatchBackoff : MinimumHeadRescanInterval;
-            receiveAnchor = new ReceiveAnchor(headRescanInterval);
+            receiveState = new ReceiveState(headRescanInterval);
             this.errorQueueAddress = errorQueueAddress;
             this.criticalErrorAction = criticalErrorAction;
             this.purgeAllMessagesOnStartup = purgeAllMessagesOnStartup;
@@ -59,7 +59,7 @@
             inputQueue = queueFactory(ReceiveAddress);
             errorQueue = queueFactory(errorQueueAddress);
 
-            processStrategy.Init(inputQueue, errorQueue, receiveAnchor, onMessage, onError, criticalErrorAction);
+            processStrategy.Init(inputQueue, errorQueue, receiveState, onMessage, onError, criticalErrorAction);
 
             if (purgeAllMessagesOnStartup)
             {
@@ -187,11 +187,11 @@
 
         async Task ReceiveMessages(CancellationToken messageReceivingCancellationToken)
         {
-            if (!processStrategy.HasReceivedMessages)
+            // each receive of the previous batch reports into the state before signalling its latch
+            if (!receiveState.BeginBatch())
             {
                 await queuePeeker.WaitForPeekDelay(messageReceivingCancellationToken).ConfigureAwait(false);
             }
-            processStrategy.ResetHasReceivedMessages();
 
             var messageCount = await queuePeeker
                 .Peek(inputQueue, messageReceivingCircuitBreaker, messageReceivingCancellationToken)
@@ -287,7 +287,7 @@
         readonly IExceptionClassifier exceptionClassifier;
         TimeSpan waitTimeCircuitBreaker;
         static readonly TimeSpan MinimumHeadRescanInterval = TimeSpan.FromSeconds(1);
-        readonly ReceiveAnchor receiveAnchor;
+        readonly ReceiveState receiveState;
         volatile SemaphoreSlim concurrencyLimiter;
         CancellationTokenSource messageReceivingCancellationTokenSource;
         CancellationTokenSource messageProcessingCancellationTokenSource;

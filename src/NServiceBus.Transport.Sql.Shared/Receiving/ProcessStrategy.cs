@@ -13,7 +13,7 @@
     {
         protected TableBasedQueue InputQueue;
         protected TableBasedQueue ErrorQueue;
-        protected ReceiveAnchor Anchor;
+        protected ReceiveState ReceiveState;
 
         OnMessage onMessage;
         OnError onError;
@@ -26,11 +26,11 @@
             log = LogManager.GetLogger(GetType());
         }
 
-        public void Init(TableBasedQueue inputQueue, TableBasedQueue errorQueue, ReceiveAnchor receiveAnchor, OnMessage onMessage, OnError onError, Action<string, Exception, CancellationToken> criticalError)
+        public void Init(TableBasedQueue inputQueue, TableBasedQueue errorQueue, ReceiveState receiveState, OnMessage onMessage, OnError onError, Action<string, Exception, CancellationToken> criticalError)
         {
             InputQueue = inputQueue;
             ErrorQueue = errorQueue;
-            Anchor = receiveAnchor;
+            ReceiveState = receiveState;
 
             this.onMessage = onMessage;
             this.onError = onError;
@@ -39,9 +39,6 @@
 
         public abstract Task ProcessMessage(CancellationTokenSource stopBatchCancellationTokenSource,
             ReceiveCountdownEvent.Signaler receiveCountdownEventSignaler, CancellationToken cancellationToken = default);
-
-        public void ResetHasReceivedMessages() => HasReceivedMessages = false;
-        public bool HasReceivedMessages { get; private set; } = true; // Starts true to avoid peek delay on first message receive
 
         /// <summary>
         /// Receives seeking past the anchor (the contended head region of the queue: other
@@ -54,10 +51,10 @@
         /// </summary>
         protected async Task<MessageReadResult> TryReceiveAnchored(DbConnection connection, DbTransaction transaction, CancellationToken cancellationToken = default)
         {
-            var anchor = Anchor.GetCurrent();
+            var anchor = ReceiveState.GetAnchor();
             var receiveResult = await InputQueue.TryReceive(connection, transaction, anchor, cancellationToken).ConfigureAwait(false);
 
-            if (!receiveResult.Successful && !receiveResult.IsPoison && anchor > 0 && Anchor.TryEnterHeadScan())
+            if (!receiveResult.Successful && !receiveResult.IsPoison && anchor > 0 && ReceiveState.TryEnterHeadScan())
             {
                 try
                 {
@@ -65,13 +62,13 @@
                 }
                 finally
                 {
-                    Anchor.ExitHeadScan();
+                    ReceiveState.ExitHeadScan();
                 }
             }
 
             if (receiveResult != MessageReadResult.NoMessage)
             {
-                HasReceivedMessages = true;
+                ReceiveState.MarkReceived();
             }
 
             return receiveResult;

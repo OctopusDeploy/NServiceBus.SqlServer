@@ -37,7 +37,7 @@ namespace NServiceBus.Transport.Sql.Shared
                                 .DeadLetter(receiveResult.PoisonMessage, connection, transaction, cancellationToken)
                                 .ConfigureAwait(false);
                             transaction.Commit();
-                            Anchor.Advance(receiveResult.RowVersion);
+                            ReceiveState.AdvanceAnchor(receiveResult.RowVersion);
                             return;
                         }
 
@@ -47,12 +47,12 @@ namespace NServiceBus.Transport.Sql.Shared
                                 cancellationToken).ConfigureAwait(false))
                         {
                             transaction.Commit();
-                            Anchor.Advance(receiveResult.RowVersion);
+                            ReceiveState.AdvanceAnchor(receiveResult.RowVersion);
                             return;
                         }
 
                         transaction.Commit();
-                        Anchor.Advance(receiveResult.RowVersion);
+                        ReceiveState.AdvanceAnchor(receiveResult.RowVersion);
                     }
                 }
                 catch (Exception ex) when (!exceptionClassifier.IsOperationCancelled(ex, cancellationToken))
@@ -63,7 +63,7 @@ namespace NServiceBus.Transport.Sql.Shared
                     }
                     failureInfoStorage.RecordFailureInfoForMessage(message.TransportId, ex, context);
                     // the receive transaction rolled back and the message is visible again
-                    Anchor.Reset();
+                    ReceiveState.ResetAnchor();
                     return;
                 }
 

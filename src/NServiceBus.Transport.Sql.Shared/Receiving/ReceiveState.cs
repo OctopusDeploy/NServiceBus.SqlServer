@@ -4,24 +4,27 @@ namespace NServiceBus.Transport.Sql.Shared
     using System.Threading;
 
     /// <summary>
-    /// Tracks the highest row version this receiver has consumed from its input queue so that
-    /// receive queries can seek past the contended head of the queue index. The head accumulates
-    /// other receivers' in-flight (locked, delete-pending) rows and ghost records of recently
-    /// deleted rows; scanning over it makes every receive more expensive as more competing
-    /// instances are added. Periodically the anchor forces a scan from the head so messages that
-    /// reappeared behind it (for example rolled back on another instance) are picked up within
-    /// <c>headRescanInterval</c>.
+    /// Per-receiver state shared between the receive loop and the concurrent receives it starts.
     /// </summary>
-    class ReceiveAnchor
+    /// <remarks>
+    /// The anchor is the highest row version this receiver has consumed from its input queue so
+    /// that receive queries can seek past the contended head of the queue index. The head
+    /// accumulates other receivers' in-flight (locked, delete-pending) rows and ghost records of
+    /// recently deleted rows; scanning over it makes every receive more expensive as more
+    /// competing instances are added. Periodically the anchor forces a scan from the head so
+    /// messages that reappeared behind it (for example rolled back on another instance) are picked
+    /// up within <c>headRescanInterval</c>.
+    /// </remarks>
+    class ReceiveState
     {
-        public ReceiveAnchor(TimeSpan headRescanInterval, TimeProvider timeProvider = null)
+        public ReceiveState(TimeSpan headRescanInterval, TimeProvider timeProvider = null)
         {
             this.timeProvider = timeProvider ?? TimeProvider.System;
             this.headRescanInterval = headRescanInterval;
             lastHeadRescanTimestamp = this.timeProvider.GetTimestamp();
         }
 
-        public long GetCurrent()
+        public long GetAnchor()
         {
             var lastRescan = Interlocked.Read(ref lastHeadRescanTimestamp);
             if (timeProvider.GetElapsedTime(lastRescan) >= headRescanInterval)
@@ -33,15 +36,15 @@ namespace NServiceBus.Transport.Sql.Shared
                 }
             }
 
-            return Interlocked.Read(ref value);
+            return Interlocked.Read(ref anchor);
         }
 
-        public void Advance(long rowVersion)
+        public void AdvanceAnchor(long rowVersion)
         {
-            var current = Interlocked.Read(ref value);
+            var current = Interlocked.Read(ref anchor);
             while (rowVersion > current)
             {
-                var witnessed = Interlocked.CompareExchange(ref value, rowVersion, current);
+                var witnessed = Interlocked.CompareExchange(ref anchor, rowVersion, current);
                 if (witnessed == current)
                 {
                     break;
@@ -51,7 +54,7 @@ namespace NServiceBus.Transport.Sql.Shared
             }
         }
 
-        public void Reset() => Interlocked.Exchange(ref value, 0);
+        public void ResetAnchor() => Interlocked.Exchange(ref anchor, 0);
 
         /// <summary>
         /// Gates the empty-receive fallback scan from the head of the queue. With wide processing
@@ -63,10 +66,20 @@ namespace NServiceBus.Transport.Sql.Shared
 
         public void ExitHeadScan() => Interlocked.Exchange(ref headScanActive, 0);
 
+        public void MarkReceived() => Interlocked.Exchange(ref receivedInBatch, 1);
+
+        /// <summary>
+        /// Starts a new receive batch and reports whether the previous one received anything, so
+        /// the receive loop can back off when a whole batch came up empty.
+        /// </summary>
+        public bool BeginBatch() => Interlocked.Exchange(ref receivedInBatch, 0) == 1;
+
         readonly TimeProvider timeProvider;
         readonly TimeSpan headRescanInterval;
-        long value;
+        long anchor;
         long lastHeadRescanTimestamp;
         int headScanActive;
+        // starts set so the first batch does not wait for the peek delay
+        int receivedInBatch = 1;
     }
 }
