@@ -17,6 +17,7 @@
             Func<string, TableBasedQueue> queueFactory,
             IPurgeQueues queuePurger,
             IPeekMessagesInQueue queuePeeker,
+            TimeSpan? headSweepInterval,
             TimeSpan waitTimeCircuitBreaker,
             ISubscriptionManager subscriptionManager,
             bool purgeAllMessagesOnStartup,
@@ -34,7 +35,11 @@
             this.purgeAllMessagesOnStartup = purgeAllMessagesOnStartup;
             this.exceptionClassifier = exceptionClassifier;
             this.timeProvider = timeProvider;
-            headSweepInterval = queuePeeker.PeekDelay > MinimumHeadSweepInterval ? queuePeeker.PeekDelay : MinimumHeadSweepInterval;
+            if (headSweepInterval is { } interval)
+            {
+                this.headSweepInterval = interval > MinimumHeadSweepInterval ? interval : MinimumHeadSweepInterval;
+            }
+            receiveState = new ReceiveState(anchoringEnabled: headSweepInterval.HasValue);
             Subscriptions = subscriptionManager;
             Id = receiverId;
             ReceiveAddress = receiveAddress;
@@ -231,7 +236,7 @@
                 // A busy queue never ends a batch, so the peek alone would rarely find rows stranded behind the
                 // anchor. Periodically sweeping from the head finds them wherever they are, including rows the
                 // batch's peek skipped because they were locked in flight at the time.
-                if (timeProvider.GetElapsedTime(lastHeadSweep) >= headSweepInterval)
+                if (headSweepInterval is { } interval && timeProvider.GetElapsedTime(lastHeadSweep) >= interval)
                 {
                     receiveState.SweepFromHead();
                     lastHeadSweep = timeProvider.GetTimestamp();
@@ -302,10 +307,10 @@
         readonly bool purgeAllMessagesOnStartup;
         readonly IExceptionClassifier exceptionClassifier;
         readonly TimeProvider timeProvider;
-        readonly TimeSpan headSweepInterval;
+        readonly TimeSpan? headSweepInterval;
         long lastHeadSweep;
         TimeSpan waitTimeCircuitBreaker;
-        readonly ReceiveState receiveState = new();
+        readonly ReceiveState receiveState;
         static readonly TimeSpan MinimumHeadSweepInterval = TimeSpan.FromSeconds(1);
         volatile SemaphoreSlim concurrencyLimiter;
         CancellationTokenSource messageReceivingCancellationTokenSource;

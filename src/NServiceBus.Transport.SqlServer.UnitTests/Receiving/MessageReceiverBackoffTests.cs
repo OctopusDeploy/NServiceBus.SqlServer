@@ -67,6 +67,7 @@ public class MessageReceiverBackoffTests
             _ => queue,
             new FakePurger(),
             peeker,
+            null,
             TimeSpan.FromSeconds(30),
             new FakeSubscriptionManager(),
             false,

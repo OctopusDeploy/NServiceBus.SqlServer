@@ -104,6 +104,7 @@ public class MessageReceiverStrandedRowTests
             _ => queue,
             new FakePurger(),
             new InMemoryPeeker(),
+            TimeSpan.FromSeconds(1),
             TimeSpan.FromSeconds(30),
             new FakeSubscriptionManager(),
             false,

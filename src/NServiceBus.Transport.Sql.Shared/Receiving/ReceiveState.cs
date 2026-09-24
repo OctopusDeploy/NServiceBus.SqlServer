@@ -22,7 +22,7 @@ namespace NServiceBus.Transport.Sql.Shared
     /// in message processing.
     /// </para>
     /// </remarks>
-    class ReceiveState
+    class ReceiveState(bool anchoringEnabled)
     {
         public ReceiveAnchor GetAnchor()
         {
@@ -58,6 +58,11 @@ namespace NServiceBus.Transport.Sql.Shared
 
         public void AdvanceAnchor(long rowVersion)
         {
+            if (!anchoringEnabled)
+            {
+                return;
+            }
+
             var current = Interlocked.Read(ref anchor);
             while (rowVersion > current)
             {
