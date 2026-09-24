@@ -56,6 +56,22 @@ namespace NServiceBus.Transport.Sql.Shared
 
         public void ResetAnchor() => Interlocked.Exchange(ref anchor, 0);
 
+        public void Apply(ProcessOutcome outcome)
+        {
+            switch (outcome.Kind)
+            {
+                case ProcessOutcomeKind.Committed:
+                    AdvanceAnchor(outcome.RowVersion);
+                    break;
+                case ProcessOutcomeKind.RolledBack:
+                    ResetAnchor();
+                    break;
+                case ProcessOutcomeKind.NoMessage:
+                default:
+                    break;
+            }
+        }
+
         /// <summary>
         /// Gates the empty-receive fallback scan from the head of the queue. With wide processing
         /// concurrency, many receives can hit an empty anchored seek at the same moment; a single

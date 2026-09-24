@@ -114,4 +114,36 @@ public class ReceiveStateTests
             Assert.That(state.BeginBatch(), Is.False, "starting a batch clears the flag");
         });
     }
+
+    [Test]
+    public void Applying_a_committed_outcome_advances_the_anchor()
+    {
+        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+
+        state.Apply(ProcessOutcome.Committed(10));
+
+        Assert.That(state.GetAnchor(), Is.EqualTo(10));
+    }
+
+    [Test]
+    public void Applying_a_rolled_back_outcome_moves_back_to_the_head()
+    {
+        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+        state.AdvanceAnchor(10);
+
+        state.Apply(ProcessOutcome.RolledBack);
+
+        Assert.That(state.GetAnchor(), Is.EqualTo(0));
+    }
+
+    [Test]
+    public void Applying_a_no_message_outcome_keeps_the_anchor()
+    {
+        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+        state.AdvanceAnchor(10);
+
+        state.Apply(ProcessOutcome.NoMessage);
+
+        Assert.That(state.GetAnchor(), Is.EqualTo(10));
+    }
 }

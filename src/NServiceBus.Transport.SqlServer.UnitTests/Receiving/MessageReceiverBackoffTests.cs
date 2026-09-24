@@ -40,7 +40,7 @@ public class MessageReceiverBackoffTests
             ? MessageReadResult.Success(new Message("1", string.Empty, Array.Empty<byte>(), false), 0)
             : MessageReadResult.NoMessage);
         var peeker = new CountingPeeker(peekDelay: TimeSpan.FromMilliseconds(200), onPeek: () => Interlocked.Exchange(ref messageAvailable, 1));
-        var receiver = CreateReceiver(peeker, queue, classifier => new ReceivingStrategy(classifier));
+        var receiver = CreateReceiver(peeker, queue);
 
         await receiver.Initialize(new PushRuntimeSettings(1), (_, _) => Task.CompletedTask, (_, _) => Task.FromResult(ErrorHandleResult.Handled)).ConfigureAwait(false);
         await receiver.StartReceive().ConfigureAwait(false);
@@ -51,9 +51,9 @@ public class MessageReceiverBackoffTests
     }
 
     static MessageReceiver CreateReceiver(CountingPeeker peeker) =>
-        CreateReceiver(peeker, new FakeQueue(() => MessageReadResult.NoMessage), classifier => new EmptyReceiveStrategy(classifier));
+        CreateReceiver(peeker, new FakeQueue(() => MessageReadResult.NoMessage));
 
-    static MessageReceiver CreateReceiver(CountingPeeker peeker, FakeQueue queue, Func<IExceptionClassifier, ProcessStrategy> strategyFactory)
+    static MessageReceiver CreateReceiver(CountingPeeker peeker, FakeQueue queue)
     {
         var classifier = new SqlServerExceptionClassifier();
 
@@ -63,7 +63,7 @@ public class MessageReceiverBackoffTests
             "queue",
             "error",
             (_, _, _) => { },
-            _ => strategyFactory(classifier),
+            _ => new ReceivingStrategy(classifier),
             _ => queue,
             new FakePurger(),
             peeker,
@@ -92,32 +92,15 @@ public class MessageReceiverBackoffTests
         public Task WaitForPeekDelay(CancellationToken cancellationToken = default) => Task.Delay(peekDelay, cancellationToken);
     }
 
-    class EmptyReceiveStrategy : ProcessStrategy
-    {
-        public EmptyReceiveStrategy(IExceptionClassifier exceptionClassifier)
-            : base(null, exceptionClassifier, null)
-        {
-        }
-
-        public override Task ProcessMessage(CancellationTokenSource stopBatchCancellationTokenSource, ReceiveCountdownEvent.Signaler receiveCountdownEventSignaler, CancellationToken cancellationToken = default)
-        {
-            stopBatchCancellationTokenSource.Cancel();
-            receiveCountdownEventSignaler.Signal();
-            return Task.CompletedTask;
-        }
-    }
-
     class ReceivingStrategy(IExceptionClassifier exceptionClassifier) : ProcessStrategy(null, exceptionClassifier, null)
     {
-        public override async Task ProcessMessage(CancellationTokenSource stopBatchCancellationTokenSource, ReceiveCountdownEvent.Signaler receiveCountdownEventSignaler, CancellationToken cancellationToken = default)
+        public override async Task<ProcessOutcome> ProcessMessage(ReceiveAttempt receiveAttempt, CancellationToken cancellationToken = default)
         {
-            var receiveResult = await TryReceiveAnchored(null, null, cancellationToken).ConfigureAwait(false);
-            receiveCountdownEventSignaler.Signal();
+            var receiveResult = await receiveAttempt.Receive(null, null, cancellationToken).ConfigureAwait(false);
 
-            if (receiveResult == MessageReadResult.NoMessage)
-            {
-                stopBatchCancellationTokenSource.Cancel();
-            }
+            return receiveResult == MessageReadResult.NoMessage
+                ? ProcessOutcome.NoMessage
+                : ProcessOutcome.Committed(receiveResult.RowVersion);
         }
     }
 

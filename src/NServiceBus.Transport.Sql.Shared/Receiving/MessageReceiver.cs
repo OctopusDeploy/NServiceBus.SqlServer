@@ -59,7 +59,7 @@
             inputQueue = queueFactory(ReceiveAddress);
             errorQueue = queueFactory(errorQueueAddress);
 
-            processStrategy.Init(inputQueue, errorQueue, receiveState, onMessage, onError, criticalErrorAction);
+            processStrategy.Init(inputQueue, errorQueue, onMessage, onError, criticalErrorAction);
 
             if (purgeAllMessagesOnStartup)
             {
@@ -238,6 +238,7 @@
             ReceiveCountdownEvent receiveLatch, CancellationToken messageProcessingCancellationToken)
         {
             using var latchSignaler = receiveLatch.GetSignaler();
+            var receiveAttempt = new ReceiveAttempt(inputQueue, receiveState, latchSignaler, stopBatchCancellationTokenSource);
             try
             {
                 try
@@ -246,15 +247,17 @@
                     // in combination with TransactionScope will apply connection pooling and enlistment synchronous in ctor.
                     await Task.Yield();
 
-                    await processStrategy.ProcessMessage(stopBatchCancellationTokenSource, latchSignaler,
-                        messageProcessingCancellationToken)
+                    var outcome = await processStrategy.ProcessMessage(receiveAttempt, messageProcessingCancellationToken)
                         .ConfigureAwait(false);
+                    receiveState.Apply(outcome);
 
                     messageProcessingCircuitBreaker.Success();
                 }
                 catch (Exception ex) when (!exceptionClassifier.IsOperationCancelled(ex, messageProcessingCancellationToken))
                 {
                     Logger.Warn("Message processing failed", ex);
+                    // no outcome was reported; any receive transaction the strategy opened has rolled back
+                    receiveState.Apply(ProcessOutcome.RolledBack);
 
                     if (!exceptionClassifier.IsDeadlockException(ex))
                     {

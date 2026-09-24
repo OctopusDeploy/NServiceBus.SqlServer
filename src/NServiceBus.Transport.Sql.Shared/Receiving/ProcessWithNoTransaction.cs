@@ -9,10 +9,10 @@ namespace NServiceBus.Transport.Sql.Shared
     class ProcessWithNoTransaction(DbConnectionFactory connectionFactory, FailureInfoStorage failureInfoStorage, TableBasedQueueCache tableBasedQueueCache, IExceptionClassifier exceptionClassifier)
         : ProcessStrategy(tableBasedQueueCache, exceptionClassifier, failureInfoStorage)
     {
-        public override async Task ProcessMessage(CancellationTokenSource stopBatchCancellationTokenSource,
-            ReceiveCountdownEvent.Signaler receiveCountdownEventSignaler, CancellationToken cancellationToken = default)
+        public override async Task<ProcessOutcome> ProcessMessage(ReceiveAttempt receiveAttempt, CancellationToken cancellationToken = default)
         {
             Message message = null;
+            MessageReadResult receiveResult;
             var context = new ContextBag();
 
             using (var connection = await connectionFactory.OpenNewConnection(cancellationToken).ConfigureAwait(false))
@@ -21,14 +21,12 @@ namespace NServiceBus.Transport.Sql.Shared
                 {
                     using (var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted))
                     {
-                        var receiveResult = await TryReceiveAnchored(connection, transaction, cancellationToken)
+                        receiveResult = await receiveAttempt.Receive(connection, transaction, cancellationToken)
                             .ConfigureAwait(false);
-                        receiveCountdownEventSignaler.Signal();
 
                         if (receiveResult == MessageReadResult.NoMessage)
                         {
-                            stopBatchCancellationTokenSource.Cancel();
-                            return;
+                            return ProcessOutcome.NoMessage;
                         }
 
                         if (receiveResult.IsPoison)
@@ -37,8 +35,7 @@ namespace NServiceBus.Transport.Sql.Shared
                                 .DeadLetter(receiveResult.PoisonMessage, connection, transaction, cancellationToken)
                                 .ConfigureAwait(false);
                             transaction.Commit();
-                            ReceiveState.AdvanceAnchor(receiveResult.RowVersion);
-                            return;
+                            return ProcessOutcome.Committed(receiveResult.RowVersion);
                         }
 
                         message = receiveResult.Message;
@@ -47,12 +44,10 @@ namespace NServiceBus.Transport.Sql.Shared
                                 cancellationToken).ConfigureAwait(false))
                         {
                             transaction.Commit();
-                            ReceiveState.AdvanceAnchor(receiveResult.RowVersion);
-                            return;
+                            return ProcessOutcome.Committed(receiveResult.RowVersion);
                         }
 
                         transaction.Commit();
-                        ReceiveState.AdvanceAnchor(receiveResult.RowVersion);
                     }
                 }
                 catch (Exception ex) when (!exceptionClassifier.IsOperationCancelled(ex, cancellationToken))
@@ -62,9 +57,7 @@ namespace NServiceBus.Transport.Sql.Shared
                         throw;
                     }
                     failureInfoStorage.RecordFailureInfoForMessage(message.TransportId, ex, context);
-                    // the receive transaction rolled back and the message is visible again
-                    ReceiveState.ResetAnchor();
-                    return;
+                    return ProcessOutcome.RolledBack;
                 }
 
                 var transportTransaction = TransportTransactions.NoTransaction(connection);
@@ -79,6 +72,8 @@ namespace NServiceBus.Transport.Sql.Shared
                     _ = await HandleError(ex, message, transportTransaction, 1, context, cancellationToken).ConfigureAwait(false);
                 }
             }
+
+            return ProcessOutcome.Committed(receiveResult.RowVersion);
         }
 
         readonly FailureInfoStorage failureInfoStorage = failureInfoStorage;
