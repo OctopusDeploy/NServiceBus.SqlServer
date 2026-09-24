@@ -84,7 +84,7 @@ public class When_receive_takes_long_to_complete
             await using var connection = await connectionFactory.OpenNewConnection();
             var transaction = await connection.BeginTransactionAsync();
 
-            await queue.TryReceive(connection, transaction);
+            await queue.TryReceive(connection, transaction, 0);
 
             started.SetResult();
 
