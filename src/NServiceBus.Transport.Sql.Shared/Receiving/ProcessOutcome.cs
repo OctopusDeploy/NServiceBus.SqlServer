@@ -13,20 +13,10 @@ namespace NServiceBus.Transport.Sql.Shared
         }
 
         public static readonly ProcessOutcome NoMessage = new(ProcessOutcomeKind.NoMessage, 0);
-
-        /// <summary>
-        /// The receive transaction rolled back, so the message is visible at the head of the queue
-        /// again and the next receive has to scan from the head to find it.
-        /// </summary>
         public static readonly ProcessOutcome RolledBack = new(ProcessOutcomeKind.RolledBack, 0);
-
-        /// <summary>
-        /// The received row is durably gone from the queue.
-        /// </summary>
         public static ProcessOutcome Committed(long rowVersion) => new(ProcessOutcomeKind.Committed, rowVersion);
 
         public ProcessOutcomeKind Kind { get; }
-
         public long RowVersion { get; }
     }
 
