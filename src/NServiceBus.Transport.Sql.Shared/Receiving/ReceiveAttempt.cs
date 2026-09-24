@@ -25,6 +25,7 @@ namespace NServiceBus.Transport.Sql.Shared
 
             if (receiveResult != MessageReadResult.NoMessage)
             {
+                ReceivedRow = true;
                 receiveState.MarkReceived();
             }
 
@@ -37,6 +38,12 @@ namespace NServiceBus.Transport.Sql.Shared
 
             return receiveResult;
         }
+
+        /// <summary>
+        /// Whether the receive returned a message or poison row, i.e. whether a failure afterwards
+        /// leaves a row visible at the head of the queue again.
+        /// </summary>
+        public bool ReceivedRow { get; private set; }
 
         /// <summary>
         /// Receives seeking past the anchor (the contended head region of the queue: other

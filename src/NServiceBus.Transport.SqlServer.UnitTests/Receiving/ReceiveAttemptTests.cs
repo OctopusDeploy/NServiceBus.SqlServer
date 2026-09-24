@@ -26,6 +26,7 @@ public class ReceiveAttemptTests
             Assert.That(latch.WaitAsync(CancellationToken).IsCompleted, Is.True, "latch signalled");
             Assert.That(stopBatch.IsCancellationRequested, Is.True, "empty receive stops the batch");
             Assert.That(state.BeginBatch(), Is.False, "nothing received");
+            Assert.That(attempt.ReceivedRow, Is.False);
         });
     }
 
@@ -46,6 +47,7 @@ public class ReceiveAttemptTests
             Assert.That(latch.WaitAsync(CancellationToken).IsCompleted, Is.True, "latch signalled");
             Assert.That(stopBatch.IsCancellationRequested, Is.False, "batch continues");
             Assert.That(state.BeginBatch(), Is.True, "message received");
+            Assert.That(attempt.ReceivedRow, Is.True);
         });
     }
 

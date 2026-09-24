@@ -256,8 +256,13 @@
                 catch (Exception ex) when (!exceptionClassifier.IsOperationCancelled(ex, messageProcessingCancellationToken))
                 {
                     Logger.Warn("Message processing failed", ex);
-                    // no outcome was reported; any receive transaction the strategy opened has rolled back
-                    receiveState.Apply(ProcessOutcome.RolledBack);
+                    // No outcome was reported, so a received row has rolled back. A failed receive query
+                    // (for example a deadlock victim under contention) consumed nothing; resetting then
+                    // would only push concurrent receives back onto the contended head.
+                    if (receiveAttempt.ReceivedRow)
+                    {
+                        receiveState.Apply(ProcessOutcome.RolledBack);
+                    }
 
                     if (!exceptionClassifier.IsDeadlockException(ex))
                     {
