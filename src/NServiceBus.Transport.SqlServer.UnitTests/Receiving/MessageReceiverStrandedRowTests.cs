@@ -16,9 +16,9 @@ using NUnit.Framework;
 public class MessageReceiverStrandedRowTests
 {
     [Test]
-    public async Task Picks_up_a_row_that_reappears_behind_the_anchor_by_the_next_batch()
+    public async Task Picks_up_a_row_that_reappears_behind_the_anchor_by_the_next_head_sweep()
     {
-        // Every receive moves the clock on 10ms, so batches (1s minimum duration) end every ~100
+        // Every receive moves the clock on 10ms, so a head sweep (1s minimum interval) runs every ~100
         // receives. After 300 receives a row reappears far behind the anchor, as if it rolled back
         // on another instance; concurrent commits keep advancing the anchor past it.
         const long strandedRowVersion = 5;
@@ -28,7 +28,7 @@ public class MessageReceiverStrandedRowTests
         var queue = new InMemoryQueue(Enumerable.Range(100, 10_000).Select(i => (long)i));
         var strandedReceivedAt = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        queue.OnReceive = (receiveNumber, rowVersion) =>
+        queue.OnReceive = (_, receiveNumber, rowVersion) =>
         {
             timeProvider.Advance(TimeSpan.FromMilliseconds(10));
 
@@ -50,8 +50,44 @@ public class MessageReceiverStrandedRowTests
         var receivedAt = await strandedReceivedAt.Task.WaitAsync(TimeSpan.FromSeconds(10), CancellationToken).ConfigureAwait(false);
         await receiver.StopReceive(CancellationToken).ConfigureAwait(false);
 
-        // at most the rest of the current batch, then the peek starts a sweep that finds it first
+        // at most one sweep interval, then the head sweep finds it first
         Assert.That(receivedAt - receivesBeforeStranding, Is.LessThanOrEqualTo(110));
+    }
+
+    [Test]
+    public async Task Sweeps_from_the_head_once_per_interval_on_a_busy_queue()
+    {
+        // every receive finds a row, so the batch never ends; each one moves the clock on 300ms, so
+        // the 1s minimum sweep interval has passed by the fifth
+        var timeProvider = new FakeTimeProvider();
+        var queue = new InMemoryQueue(Enumerable.Range(100, 10_000).Select(i => (long)i));
+        var anchors = new List<long>();
+        var sixReceives = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        queue.OnReceive = (anchor, receiveNumber, _) =>
+        {
+            timeProvider.Advance(TimeSpan.FromMilliseconds(300));
+
+            lock (anchors)
+            {
+                anchors.Add(anchor);
+            }
+
+            if (receiveNumber == 6)
+            {
+                sixReceives.TrySetResult();
+            }
+        };
+
+        var receiver = CreateReceiver(queue, timeProvider);
+
+        await receiver.Initialize(new PushRuntimeSettings(1), (_, _) => Task.CompletedTask, (_, _) => Task.FromResult(ErrorHandleResult.Handled), CancellationToken).ConfigureAwait(false);
+        await receiver.StartReceive(CancellationToken).ConfigureAwait(false);
+        await sixReceives.Task.WaitAsync(TimeSpan.FromSeconds(10), CancellationToken).ConfigureAwait(false);
+        await receiver.StopReceive(CancellationToken).ConfigureAwait(false);
+
+        // from the peek's lowest row, then the head sweep, which finds nothing stranded and hands back to the anchor
+        Assert.That(anchors.Take(6), Is.EqualTo(new long[] { 99, 100, 101, 102, 0, 104 }));
     }
 
     static MessageReceiver CreateReceiver(InMemoryQueue queue, TimeProvider timeProvider)
@@ -82,7 +118,7 @@ public class MessageReceiverStrandedRowTests
     /// </summary>
     class InMemoryQueue(IEnumerable<long> rowVersions) : TableBasedQueue(new SqlServerConstants(), "[dbo].[queue]", "queue", false)
     {
-        public Action<int, long?> OnReceive { get; set; }
+        public Action<long, int, long?> OnReceive { get; set; }
 
         public void Add(long rowVersion)
         {
@@ -117,7 +153,7 @@ public class MessageReceiverStrandedRowTests
                 receiveNumber = ++receives;
             }
 
-            OnReceive?.Invoke(receiveNumber, received);
+            OnReceive?.Invoke(anchor, receiveNumber, received);
 
             return Task.FromResult(received is { } rowVersion
                 ? MessageReadResult.Success(new Message(rowVersion.ToString(), string.Empty, Array.Empty<byte>(), false), rowVersion)

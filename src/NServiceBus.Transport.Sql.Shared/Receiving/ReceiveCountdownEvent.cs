@@ -29,18 +29,6 @@ class ReceiveCountdownEvent
 
     public Signaler GetSignaler() => new(this);
 
-    /// <summary>
-    /// Accounts for receives that will not be started because the batch ended early, so waiting
-    /// completes once the started ones have signalled.
-    /// </summary>
-    public void Skip(int skipped)
-    {
-        if (skipped > 0 && Interlocked.Add(ref count, -skipped) == 0)
-        {
-            _ = completionSource.TrySetResult();
-        }
-    }
-
     void Signal()
     {
         if (Interlocked.Decrement(ref count) == 0)

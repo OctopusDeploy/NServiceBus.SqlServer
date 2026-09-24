@@ -158,6 +158,28 @@ public class ReceiveStateTests
     }
 
     [Test]
+    public void A_head_sweep_seeks_from_the_start_of_the_queue()
+    {
+        var state = new ReceiveState();
+        state.AdvanceAnchor(10);
+
+        state.SweepFromHead();
+        state.AdvanceAnchor(20);
+
+        Assert.That(state.GetAnchor(), Is.EqualTo(ReceiveAnchor.Sweep(0)));
+    }
+
+    [Test]
+    public void A_head_sweep_is_not_needed_while_the_anchor_is_at_the_head()
+    {
+        var state = new ReceiveState();
+
+        state.SweepFromHead();
+
+        Assert.That(state.GetAnchor(), Is.EqualTo(ReceiveAnchor.Fast(0)));
+    }
+
+    [Test]
     public void First_batch_does_not_back_off()
     {
         var state = new ReceiveState();

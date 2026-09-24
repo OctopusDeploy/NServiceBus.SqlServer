@@ -45,6 +45,17 @@ namespace NServiceBus.Transport.Sql.Shared
             }
         }
 
+        /// <summary>
+        /// Sweeps from the start of the queue, finding rows stranded anywhere behind the anchor
+        /// </summary>
+        public void SweepFromHead()
+        {
+            if (Interlocked.Read(ref anchor) > 0)
+            {
+                StartOrLowerSweep(0);
+            }
+        }
+
         public void AdvanceAnchor(long rowVersion)
         {
             var current = Interlocked.Read(ref anchor);
