@@ -1,7 +1,5 @@
 namespace NServiceBus.Transport.SqlServer.UnitTests.Receiving;
 
-using System;
-using Microsoft.Extensions.Time.Testing;
 using NServiceBus.Transport.Sql.Shared;
 using NUnit.Framework;
 
@@ -10,7 +8,7 @@ public class ReceiveStateTests
     [Test]
     public void Starts_at_the_head_of_the_queue()
     {
-        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+        var state = new ReceiveState();
 
         Assert.That(state.GetAnchor(), Is.EqualTo(0));
     }
@@ -18,7 +16,7 @@ public class ReceiveStateTests
     [Test]
     public void Advances_monotonically()
     {
-        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+        var state = new ReceiveState();
 
         state.AdvanceAnchor(10);
         state.AdvanceAnchor(5); // out-of-order completion of a concurrent receive must not move the anchor back
@@ -29,7 +27,7 @@ public class ReceiveStateTests
     [Test]
     public void Retreats_to_just_before_a_rolled_back_row()
     {
-        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+        var state = new ReceiveState();
 
         state.AdvanceAnchor(10);
         state.RetreatAnchor(7);
@@ -41,7 +39,7 @@ public class ReceiveStateTests
     [Test]
     public void Retreating_never_moves_the_anchor_forward()
     {
-        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+        var state = new ReceiveState();
 
         state.AdvanceAnchor(5);
         state.RetreatAnchor(10); // the rolled back row is already past the anchor
@@ -50,62 +48,21 @@ public class ReceiveStateTests
     }
 
     [Test]
-    public void Periodically_forces_a_scan_from_the_head()
+    public void Setting_before_the_lowest_available_row_moves_the_anchor_in_either_direction()
     {
-        var timeProvider = new FakeTimeProvider();
-        var state = new ReceiveState(TimeSpan.FromSeconds(1), timeProvider);
+        var state = new ReceiveState();
 
-        state.AdvanceAnchor(10);
-        Assert.That(state.GetAnchor(), Is.EqualTo(10));
+        state.SetAnchorBefore(20);
+        Assert.That(state.GetAnchor(), Is.EqualTo(19), "forward past the churned head");
 
-        timeProvider.Advance(TimeSpan.FromSeconds(1.5));
-
-        Assert.Multiple(() =>
-        {
-            // one head rescan is due, subsequent receives resume from the anchor
-            Assert.That(state.GetAnchor(), Is.EqualTo(0));
-            Assert.That(state.GetAnchor(), Is.EqualTo(10));
-        });
-    }
-
-    [Test]
-    public void Advancing_does_not_postpone_the_head_rescan()
-    {
-        var timeProvider = new FakeTimeProvider();
-        var state = new ReceiveState(TimeSpan.FromSeconds(1), timeProvider);
-
-        for (var i = 1; i <= 4; i++)
-        {
-            state.AdvanceAnchor(i);
-            timeProvider.Advance(TimeSpan.FromSeconds(0.4));
-        }
-
-        // 1.6s elapsed with continuous receives: a head rescan must still have become due
-        Assert.That(state.GetAnchor(), Is.EqualTo(0));
-    }
-
-    [Test]
-    public void Only_one_empty_fallback_head_scan_runs_at_a_time()
-    {
-        // With wide processing concurrency, many receives can hit an empty anchored seek at the
-        // same moment; only one of them may pay the expensive from-head fallback scan.
-        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
-
-        Assert.Multiple(() =>
-        {
-            Assert.That(state.TryEnterHeadScan(), Is.True, "first caller wins the gate");
-            Assert.That(state.TryEnterHeadScan(), Is.False, "concurrent caller must not also scan");
-        });
-
-        state.ExitHeadScan();
-
-        Assert.That(state.TryEnterHeadScan(), Is.True, "gate reopens after the scan completes");
+        state.SetAnchorBefore(7);
+        Assert.That(state.GetAnchor(), Is.EqualTo(6), "back to a row that became visible behind the anchor");
     }
 
     [Test]
     public void First_batch_does_not_back_off()
     {
-        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+        var state = new ReceiveState();
 
         Assert.That(state.BeginBatch(), Is.True);
     }
@@ -113,7 +70,7 @@ public class ReceiveStateTests
     [Test]
     public void Reports_whether_the_previous_batch_received_anything()
     {
-        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+        var state = new ReceiveState();
         _ = state.BeginBatch();
 
         Assert.That(state.BeginBatch(), Is.False, "nothing received in the previous batch");

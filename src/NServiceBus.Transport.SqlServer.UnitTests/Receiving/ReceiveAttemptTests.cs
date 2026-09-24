@@ -4,7 +4,6 @@ using System;
 using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Extensions.Time.Testing;
 using NServiceBus.Transport.Sql.Shared;
 using NUnit.Framework;
 
@@ -15,7 +14,7 @@ public class ReceiveAttemptTests
     {
         var latch = new ReceiveCountdownEvent(1);
         var stopBatch = new CancellationTokenSource();
-        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+        var state = new ReceiveState();
         _ = state.BeginBatch();
         var attempt = new ReceiveAttempt(new FakeQueue(MessageReadResult.NoMessage), state, latch.GetSignaler(), stopBatch);
 
@@ -34,7 +33,7 @@ public class ReceiveAttemptTests
     {
         var latch = new ReceiveCountdownEvent(1);
         var stopBatch = new CancellationTokenSource();
-        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+        var state = new ReceiveState();
         _ = state.BeginBatch();
         var message = MessageReadResult.Success(new Message("1", string.Empty, Array.Empty<byte>(), false), 1);
         var attempt = new ReceiveAttempt(new FakeQueue(message), state, latch.GetSignaler(), stopBatch);
@@ -52,7 +51,7 @@ public class ReceiveAttemptTests
     [Test]
     public async Task Receives_only_once()
     {
-        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+        var state = new ReceiveState();
         var attempt = new ReceiveAttempt(new FakeQueue(MessageReadResult.NoMessage), state, new ReceiveCountdownEvent(1).GetSignaler(), new CancellationTokenSource());
 
         _ = await attempt.Receive(null, null, CancellationToken).ConfigureAwait(false);
@@ -63,7 +62,7 @@ public class ReceiveAttemptTests
     [Test]
     public async Task Committing_advances_the_anchor_to_the_received_row()
     {
-        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+        var state = new ReceiveState();
         var attempt = CreateAttempt(state, MessageReadResult.Success(CreateMessage(), 10));
 
         _ = await attempt.Receive(null, null, CancellationToken).ConfigureAwait(false);
@@ -75,7 +74,7 @@ public class ReceiveAttemptTests
     [Test]
     public async Task Rolling_back_retreats_the_anchor_to_the_received_row()
     {
-        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+        var state = new ReceiveState();
         var attempt = CreateAttempt(state, MessageReadResult.Success(CreateMessage(), 7));
 
         _ = await attempt.Receive(null, null, CancellationToken).ConfigureAwait(false);
@@ -89,7 +88,7 @@ public class ReceiveAttemptTests
     public void Settling_without_a_received_row_keeps_the_anchor()
     {
         // e.g. the receive query itself failed (a deadlock victim) and consumed nothing
-        var state = new ReceiveState(TimeSpan.FromSeconds(1), new FakeTimeProvider());
+        var state = new ReceiveState();
         state.AdvanceAnchor(10);
         var attempt = CreateAttempt(state, MessageReadResult.NoMessage);
 

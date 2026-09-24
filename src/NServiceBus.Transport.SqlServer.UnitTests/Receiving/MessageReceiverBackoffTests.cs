@@ -68,7 +68,6 @@ public class MessageReceiverBackoffTests
             new FakePurger(),
             peeker,
             TimeSpan.FromSeconds(30),
-            peeker.PeekDelay,
             new FakeSubscriptionManager(),
             false,
             classifier);
@@ -82,11 +81,11 @@ public class MessageReceiverBackoffTests
 
         public int PeekCount => Volatile.Read(ref peekCount);
 
-        public Task<int> Peek(TableBasedQueue inputQueue, RepeatedFailuresOverTimeCircuitBreaker circuitBreaker, CancellationToken cancellationToken = default)
+        public Task<PeekResult> Peek(TableBasedQueue inputQueue, RepeatedFailuresOverTimeCircuitBreaker circuitBreaker, CancellationToken cancellationToken = default)
         {
             Interlocked.Increment(ref peekCount);
             onPeek?.Invoke();
-            return Task.FromResult(10);
+            return Task.FromResult(new PeekResult(10, 1));
         }
 
         public Task WaitForPeekDelay(CancellationToken cancellationToken = default) => Task.Delay(peekDelay, cancellationToken);

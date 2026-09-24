@@ -18,7 +18,6 @@
             IPurgeQueues queuePurger,
             IPeekMessagesInQueue queuePeeker,
             TimeSpan waitTimeCircuitBreaker,
-            TimeSpan emptyBatchBackoff,
             ISubscriptionManager subscriptionManager,
             bool purgeAllMessagesOnStartup,
             IExceptionClassifier exceptionClassifier)
@@ -29,8 +28,6 @@
             this.queueFactory = queueFactory;
             this.queuePeeker = queuePeeker;
             this.waitTimeCircuitBreaker = waitTimeCircuitBreaker;
-            var headRescanInterval = emptyBatchBackoff > MinimumHeadRescanInterval ? emptyBatchBackoff : MinimumHeadRescanInterval;
-            receiveState = new ReceiveState(headRescanInterval);
             this.errorQueueAddress = errorQueueAddress;
             this.criticalErrorAction = criticalErrorAction;
             this.purgeAllMessagesOnStartup = purgeAllMessagesOnStartup;
@@ -193,14 +190,16 @@
                 await queuePeeker.WaitForPeekDelay(messageReceivingCancellationToken).ConfigureAwait(false);
             }
 
-            var messageCount = await queuePeeker
+            var peekResult = await queuePeeker
                 .Peek(inputQueue, messageReceivingCircuitBreaker, messageReceivingCancellationToken)
                 .ConfigureAwait(false);
 
-            if (messageCount == 0)
+            if (peekResult.MessageCount == 0)
             {
                 return;
             }
+
+            receiveState.SetAnchorBefore(peekResult.LowestRowVersion);
 
             messageReceivingCancellationToken.ThrowIfCancellationRequested();
 
@@ -211,7 +210,7 @@
             var maximumConcurrentProcessing =
                 messageProcessingCircuitBreaker.IsTriggered || messageReceivingCircuitBreaker.IsTriggered
                     ? 1
-                    : messageCount;
+                    : peekResult.MessageCount;
 
             var receiveLatch = new ReceiveCountdownEvent(maximumConcurrentProcessing);
             for (var i = 0; i < maximumConcurrentProcessing; i++)
@@ -290,8 +289,7 @@
         readonly bool purgeAllMessagesOnStartup;
         readonly IExceptionClassifier exceptionClassifier;
         TimeSpan waitTimeCircuitBreaker;
-        static readonly TimeSpan MinimumHeadRescanInterval = TimeSpan.FromSeconds(1);
-        readonly ReceiveState receiveState;
+        readonly ReceiveState receiveState = new();
         volatile SemaphoreSlim concurrencyLimiter;
         CancellationTokenSource messageReceivingCancellationTokenSource;
         CancellationTokenSource messageProcessingCancellationTokenSource;

@@ -19,7 +19,7 @@ namespace NServiceBus.Transport.Sql.Shared
             }
             receiveStarted = true;
 
-            var receiveResult = await TryReceiveAnchored(connection, transaction, cancellationToken).ConfigureAwait(false);
+            var receiveResult = await inputQueue.TryReceive(connection, transaction, receiveState.GetAnchor(), cancellationToken).ConfigureAwait(false);
 
             if (receiveResult != MessageReadResult.NoMessage)
             {
@@ -60,35 +60,6 @@ namespace NServiceBus.Transport.Sql.Shared
                 default:
                     break;
             }
-        }
-
-        /// <summary>
-        /// Receives seeking past the anchor (the contended head region of the queue: other
-        /// instances' locked in-flight rows and remains of recently consumed rows). When nothing
-        /// is found past the anchor, rescans once from the head so messages that reappeared
-        /// behind it (for example rolled back on another instance) are found before the queue is
-        /// declared empty. The rescan is gated: with wide processing concurrency many receives
-        /// hit an empty seek at the same moment, and a single from-head probe settles whether the
-        /// queue is really empty — the rest report no message without paying for the scan.
-        /// </summary>
-        async Task<MessageReadResult> TryReceiveAnchored(DbConnection connection, DbTransaction transaction, CancellationToken cancellationToken)
-        {
-            var anchor = receiveState.GetAnchor();
-            var receiveResult = await inputQueue.TryReceive(connection, transaction, anchor, cancellationToken).ConfigureAwait(false);
-
-            if (receiveResult is { Successful: false, IsPoison: false } && anchor > 0 && receiveState.TryEnterHeadScan())
-            {
-                try
-                {
-                    receiveResult = await inputQueue.TryReceive(connection, transaction, 0, cancellationToken).ConfigureAwait(false);
-                }
-                finally
-                {
-                    receiveState.ExitHeadScan();
-                }
-            }
-
-            return receiveResult;
         }
 
         bool receiveStarted;

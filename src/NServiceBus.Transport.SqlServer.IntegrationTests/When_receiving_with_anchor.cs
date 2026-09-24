@@ -104,6 +104,81 @@ namespace NServiceBus.Transport.SqlServer.IntegrationTests
             }
         }
 
+        [Test]
+        public async Task Peek_reports_the_lowest_row_committed_behind_the_anchor()
+        {
+            using (var slowSender = await dbConnectionFactory.OpenNewConnection())
+            using (var receiver = await dbConnectionFactory.OpenNewConnection())
+            {
+                long earlyRowVersion;
+
+                using (var slowTransaction = slowSender.BeginTransaction())
+                {
+                    await Send(slowSender, "committed-late", slowTransaction);
+                    await Send(receiver, "committed-early");
+
+                    earlyRowVersion = (await queue.TryReceive(receiver, null, 0)).RowVersion;
+
+                    await slowTransaction.CommitAsync();
+                }
+
+                queue.FormatPeekCommand();
+                var peek = await queue.TryPeek(receiver, null);
+                var fromPeekAnchor = await queue.TryReceive(receiver, null, peek.LowestRowVersion - 1);
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(peek.MessageCount, Is.EqualTo(1));
+                    Assert.That(peek.LowestRowVersion, Is.LessThan(earlyRowVersion), "the late commit is behind the consumed row");
+                    Assert.That(fromPeekAnchor.Message.Headers[Headers.MessageId], Is.EqualTo("committed-late"));
+                });
+            }
+        }
+
+        [Test]
+        public async Task Peek_skips_rows_locked_by_an_in_flight_receive()
+        {
+            using (var inFlight = await dbConnectionFactory.OpenNewConnection())
+            using (var peeker = await dbConnectionFactory.OpenNewConnection())
+            {
+                await Send(peeker, "in-flight");
+                await Send(peeker, "available");
+
+                using (var receiveTransaction = inFlight.BeginTransaction())
+                {
+                    var locked = await queue.TryReceive(inFlight, receiveTransaction, 0);
+
+                    queue.FormatPeekCommand();
+                    var peek = await queue.TryPeek(peeker, null);
+                    var fromPeekAnchor = await queue.TryReceive(peeker, null, peek.LowestRowVersion - 1);
+
+                    Assert.Multiple(() =>
+                    {
+                        Assert.That(peek.LowestRowVersion, Is.GreaterThan(locked.RowVersion));
+                        Assert.That(fromPeekAnchor.Message.Headers[Headers.MessageId], Is.EqualTo("available"));
+                    });
+
+                    await receiveTransaction.RollbackAsync();
+                }
+            }
+        }
+
+        [Test]
+        public async Task Peek_of_an_empty_queue_reports_no_row()
+        {
+            using (var connection = await dbConnectionFactory.OpenNewConnection())
+            {
+                queue.FormatPeekCommand();
+                var peek = await queue.TryPeek(connection, null);
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(peek.MessageCount, Is.EqualTo(0));
+                    Assert.That(peek.LowestRowVersion, Is.EqualTo(0));
+                });
+            }
+        }
+
         async Task Send(System.Data.Common.DbConnection connection, string messageId, System.Data.Common.DbTransaction transaction = null, CancellationToken cancellationToken = default)
         {
             var headers = new System.Collections.Generic.Dictionary<string, string> { [Headers.MessageId] = messageId };
