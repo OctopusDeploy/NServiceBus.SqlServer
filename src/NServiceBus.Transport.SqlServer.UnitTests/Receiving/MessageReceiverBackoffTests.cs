@@ -37,7 +37,7 @@ public class MessageReceiverBackoffTests
         // each batch receives one message and then comes up empty, ending the batch early
         var messageAvailable = 0;
         var queue = new FakeQueue(() => Interlocked.Exchange(ref messageAvailable, 0) == 1
-            ? MessageReadResult.Success(new Message("1", string.Empty, Array.Empty<byte>(), false))
+            ? MessageReadResult.Success(new Message("1", string.Empty, Array.Empty<byte>(), false), 0)
             : MessageReadResult.NoMessage);
         var peeker = new CountingPeeker(onPeek: () => Interlocked.Exchange(ref messageAvailable, 1));
         var receiver = CreateReceiver(peeker, emptyBatchBackoff: TimeSpan.FromMilliseconds(200), queue, classifier => new ReceivingStrategy(classifier));

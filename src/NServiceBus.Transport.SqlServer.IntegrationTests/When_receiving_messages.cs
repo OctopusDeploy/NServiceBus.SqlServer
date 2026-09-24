@@ -109,7 +109,7 @@ namespace NServiceBus.Transport.SqlServer.IntegrationTests
                 NumberOfReceives++;
 
                 var readResult = NumberOfReceives <= successfulReceives
-                    ? MessageReadResult.Success(new Message("1", string.Empty, new byte[0], false))
+                    ? MessageReadResult.Success(new Message("1", string.Empty, new byte[0], false), 0)
                     : MessageReadResult.NoMessage;
 
                 return Task.FromResult(readResult);
