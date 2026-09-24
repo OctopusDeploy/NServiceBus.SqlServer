@@ -1,4 +1,4 @@
-namespace NServiceBus.Transport.SqlServer.UnitTests.Receiving;
+﻿namespace NServiceBus.Transport.SqlServer.UnitTests.Receiving;
 
 using System;
 using System.Threading;
@@ -18,8 +18,8 @@ public class MessageReceiverBackoffTests
         // for messages: peek reports a backlog, but every receive comes up empty because other
         // nodes grabbed the messages. Without a backoff the pump re-peeks in a hot loop, which
         // multiplies the load on the queue table by the number of nodes.
-        var peeker = new CountingPeeker();
-        var receiver = CreateReceiver(peeker, emptyBatchBackoff: TimeSpan.FromMilliseconds(200));
+        var peeker = new CountingPeeker(peekDelay: TimeSpan.FromMilliseconds(200));
+        var receiver = CreateReceiver(peeker);
 
         await receiver.Initialize(new PushRuntimeSettings(8), (_, _) => Task.CompletedTask, (_, _) => Task.FromResult(ErrorHandleResult.Handled)).ConfigureAwait(false);
         await receiver.StartReceive().ConfigureAwait(false);
@@ -39,8 +39,8 @@ public class MessageReceiverBackoffTests
         var queue = new FakeQueue(() => Interlocked.Exchange(ref messageAvailable, 0) == 1
             ? MessageReadResult.Success(new Message("1", string.Empty, Array.Empty<byte>(), false), 0)
             : MessageReadResult.NoMessage);
-        var peeker = new CountingPeeker(onPeek: () => Interlocked.Exchange(ref messageAvailable, 1));
-        var receiver = CreateReceiver(peeker, emptyBatchBackoff: TimeSpan.FromMilliseconds(200), queue, classifier => new ReceivingStrategy(classifier));
+        var peeker = new CountingPeeker(peekDelay: TimeSpan.FromMilliseconds(200), onPeek: () => Interlocked.Exchange(ref messageAvailable, 1));
+        var receiver = CreateReceiver(peeker, queue, classifier => new ReceivingStrategy(classifier));
 
         await receiver.Initialize(new PushRuntimeSettings(1), (_, _) => Task.CompletedTask, (_, _) => Task.FromResult(ErrorHandleResult.Handled)).ConfigureAwait(false);
         await receiver.StartReceive().ConfigureAwait(false);
@@ -50,10 +50,10 @@ public class MessageReceiverBackoffTests
         Assert.That(peeker.PeekCount, Is.GreaterThan(20));
     }
 
-    static MessageReceiver CreateReceiver(CountingPeeker peeker, TimeSpan emptyBatchBackoff) =>
-        CreateReceiver(peeker, emptyBatchBackoff, new FakeQueue(() => MessageReadResult.NoMessage), classifier => new EmptyReceiveStrategy(classifier));
+    static MessageReceiver CreateReceiver(CountingPeeker peeker) =>
+        CreateReceiver(peeker, new FakeQueue(() => MessageReadResult.NoMessage), classifier => new EmptyReceiveStrategy(classifier));
 
-    static MessageReceiver CreateReceiver(CountingPeeker peeker, TimeSpan emptyBatchBackoff, FakeQueue queue, Func<IExceptionClassifier, ProcessStrategy> strategyFactory)
+    static MessageReceiver CreateReceiver(CountingPeeker peeker, FakeQueue queue, Func<IExceptionClassifier, ProcessStrategy> strategyFactory)
     {
         var classifier = new SqlServerExceptionClassifier();
 
@@ -68,15 +68,17 @@ public class MessageReceiverBackoffTests
             new FakePurger(),
             peeker,
             TimeSpan.FromSeconds(30),
-            emptyBatchBackoff,
+            peeker.PeekDelay,
             new FakeSubscriptionManager(),
             false,
             classifier);
     }
 
-    class CountingPeeker(Action onPeek = null) : IPeekMessagesInQueue
+    class CountingPeeker(TimeSpan peekDelay, Action onPeek = null) : IPeekMessagesInQueue
     {
         int peekCount;
+
+        public TimeSpan PeekDelay => peekDelay;
 
         public int PeekCount => Volatile.Read(ref peekCount);
 
@@ -86,6 +88,8 @@ public class MessageReceiverBackoffTests
             onPeek?.Invoke();
             return Task.FromResult(10);
         }
+
+        public Task WaitForPeekDelay(CancellationToken cancellationToken = default) => Task.Delay(peekDelay, cancellationToken);
     }
 
     class EmptyReceiveStrategy : ProcessStrategy

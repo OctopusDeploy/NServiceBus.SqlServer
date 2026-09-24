@@ -30,17 +30,17 @@
                 await circuitBreaker.Failure(ex, cancellationToken).ConfigureAwait(false);
             }
 
-            if (messageCount == 0)
-            {
-                if (Logger.IsDebugEnabled)
-                {
-                    Logger.Debug($"Input queue empty. Next peek operation will be delayed for {peekDelay}.");
-                }
+            return messageCount;
+        }
 
-                await Task.Delay(peekDelay, cancellationToken).ConfigureAwait(false);
+        public Task WaitForPeekDelay(CancellationToken cancellationToken = default)
+        {
+            if (Logger.IsDebugEnabled)
+            {
+                Logger.Debug($"Input queue empty. Next peek operation will be delayed for {peekDelay}.");
             }
 
-            return messageCount;
+            return Task.Delay(peekDelay, cancellationToken);
         }
 
         static readonly ILog Logger = LogManager.GetLogger<QueuePeeker>();

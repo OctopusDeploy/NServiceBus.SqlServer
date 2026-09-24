@@ -1,4 +1,4 @@
-namespace NServiceBus.Transport.Sql.Shared
+﻿namespace NServiceBus.Transport.Sql.Shared
 {
     using System;
     using System.Threading;
@@ -29,11 +29,6 @@ namespace NServiceBus.Transport.Sql.Shared
             this.queueFactory = queueFactory;
             this.queuePeeker = queuePeeker;
             this.waitTimeCircuitBreaker = waitTimeCircuitBreaker;
-            this.emptyBatchBackoff = emptyBatchBackoff;
-            // The head rescan is the expensive from-head receive that picks up messages which
-            // reappeared behind the anchor (e.g. rolled back on another instance). Its interval
-            // trades that pickup latency against paying the old contended head-scan cost, so it
-            // must not shrink with an aggressively tuned peek delay (e.g. 100ms) — floor it at 1s.
             var headRescanInterval = emptyBatchBackoff > MinimumHeadRescanInterval ? emptyBatchBackoff : MinimumHeadRescanInterval;
             receiveAnchor = new ReceiveAnchor(headRescanInterval);
             this.errorQueueAddress = errorQueueAddress;
@@ -192,15 +187,11 @@ namespace NServiceBus.Transport.Sql.Shared
 
         async Task ReceiveMessages(CancellationToken messageReceivingCancellationToken)
         {
-            if (previousBatchReceivedCount.HasValue && processStrategy.ReceivedCount == previousBatchReceivedCount)
+            if (!processStrategy.HasReceivedMessages)
             {
-                // The peek saw messages but the whole batch received none; competing instances
-                // consumed them first. Back off like an empty peek so instances don't re-peek in a
-                // tight loop against the same queue table.
-                await Task.Delay(emptyBatchBackoff, messageReceivingCancellationToken).ConfigureAwait(false);
+                await queuePeeker.WaitForPeekDelay(messageReceivingCancellationToken).ConfigureAwait(false);
             }
-
-            previousBatchReceivedCount = null;
+            processStrategy.ResetHasReceivedMessages();
 
             var messageCount = await queuePeeker
                 .Peek(inputQueue, messageReceivingCircuitBreaker, messageReceivingCancellationToken)
@@ -210,8 +201,6 @@ namespace NServiceBus.Transport.Sql.Shared
             {
                 return;
             }
-
-            previousBatchReceivedCount = processStrategy.ReceivedCount;
 
             messageReceivingCancellationToken.ThrowIfCancellationRequested();
 
@@ -297,10 +286,8 @@ namespace NServiceBus.Transport.Sql.Shared
         readonly bool purgeAllMessagesOnStartup;
         readonly IExceptionClassifier exceptionClassifier;
         TimeSpan waitTimeCircuitBreaker;
-        readonly TimeSpan emptyBatchBackoff;
         static readonly TimeSpan MinimumHeadRescanInterval = TimeSpan.FromSeconds(1);
         readonly ReceiveAnchor receiveAnchor;
-        long? previousBatchReceivedCount;
         volatile SemaphoreSlim concurrencyLimiter;
         CancellationTokenSource messageReceivingCancellationTokenSource;
         CancellationTokenSource messageProcessingCancellationTokenSource;

@@ -8,5 +8,7 @@ namespace NServiceBus.Transport.Sql.Shared
 #pragma warning restore CA1711 // Identifiers should not have incorrect suffix
     {
         Task<int> Peek(TableBasedQueue inputQueue, RepeatedFailuresOverTimeCircuitBreaker circuitBreaker, CancellationToken cancellationToken = default);
+
+        Task WaitForPeekDelay(CancellationToken cancellationToken = default);
     }
 }

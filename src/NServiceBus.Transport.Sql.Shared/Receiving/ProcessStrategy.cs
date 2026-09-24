@@ -1,4 +1,4 @@
-namespace NServiceBus.Transport.Sql.Shared
+﻿namespace NServiceBus.Transport.Sql.Shared
 {
     using System;
     using System.Data.Common;
@@ -40,11 +40,8 @@ namespace NServiceBus.Transport.Sql.Shared
         public abstract Task ProcessMessage(CancellationTokenSource stopBatchCancellationTokenSource,
             ReceiveCountdownEvent.Signaler receiveCountdownEventSignaler, CancellationToken cancellationToken = default);
 
-        /// <summary>
-        /// Total receives that returned a row (including poison messages), used by the receiver to
-        /// tell whether a batch found anything.
-        /// </summary>
-        public long ReceivedCount => Interlocked.Read(ref receivedCount);
+        public void ResetHasReceivedMessages() => HasReceivedMessages = false;
+        public bool HasReceivedMessages { get; private set; } = true; // Starts true to avoid peek delay on first message receive
 
         /// <summary>
         /// Receives seeking past the anchor (the contended head region of the queue: other
@@ -74,7 +71,7 @@ namespace NServiceBus.Transport.Sql.Shared
 
             if (receiveResult != MessageReadResult.NoMessage)
             {
-                Interlocked.Increment(ref receivedCount);
+                HasReceivedMessages = true;
             }
 
             return receiveResult;
@@ -170,7 +167,6 @@ namespace NServiceBus.Transport.Sql.Shared
         readonly IExceptionClassifier exceptionClassifier;
         readonly FailureInfoStorage failureInfoStorage;
         Action<string, Exception, CancellationToken> criticalError;
-        long receivedCount;
         protected ILog log;
     }
 }
