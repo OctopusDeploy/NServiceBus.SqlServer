@@ -68,7 +68,7 @@ public class ReceiveAttemptTests
         _ = await attempt.Receive(null, null, CancellationToken).ConfigureAwait(false);
         attempt.Settle(ProcessOutcome.Committed);
 
-        Assert.That(state.GetAnchor(), Is.EqualTo(10));
+        Assert.That(state.GetAnchor().Anchor, Is.EqualTo(10));
     }
 
     [Test]
@@ -81,7 +81,7 @@ public class ReceiveAttemptTests
         state.AdvanceAnchor(10); // a concurrent receive committed a later row
         attempt.Settle(ProcessOutcome.RolledBack);
 
-        Assert.That(state.GetAnchor(), Is.EqualTo(6));
+        Assert.That(state.GetAnchor().Anchor, Is.EqualTo(6));
     }
 
     [Test]
@@ -94,7 +94,7 @@ public class ReceiveAttemptTests
 
         attempt.Settle(ProcessOutcome.RolledBack);
 
-        Assert.That(state.GetAnchor(), Is.EqualTo(10));
+        Assert.That(state.GetAnchor().Anchor, Is.EqualTo(10));
     }
 
     static ReceiveAttempt CreateAttempt(ReceiveState state, MessageReadResult result) =>

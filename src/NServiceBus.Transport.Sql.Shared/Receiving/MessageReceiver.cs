@@ -20,7 +20,8 @@
             TimeSpan waitTimeCircuitBreaker,
             ISubscriptionManager subscriptionManager,
             bool purgeAllMessagesOnStartup,
-            IExceptionClassifier exceptionClassifier)
+            IExceptionClassifier exceptionClassifier,
+            TimeProvider timeProvider)
         {
             this.transport = transport;
             this.processStrategyFactory = processStrategyFactory;
@@ -32,6 +33,7 @@
             this.criticalErrorAction = criticalErrorAction;
             this.purgeAllMessagesOnStartup = purgeAllMessagesOnStartup;
             this.exceptionClassifier = exceptionClassifier;
+            this.timeProvider = timeProvider;
             Subscriptions = subscriptionManager;
             Id = receiverId;
             ReceiveAddress = receiveAddress;
@@ -199,7 +201,7 @@
                 return;
             }
 
-            receiveState.SetAnchorBefore(peekResult.LowestRowVersion);
+            receiveState.ApplyPeekResult(peekResult.LowestRowVersion);
 
             messageReceivingCancellationToken.ThrowIfCancellationRequested();
 
@@ -212,6 +214,11 @@
                     ? 1
                     : peekResult.MessageCount;
 
+            // A batch time limit ensures we occasionally do new "peeks" even when table is full.  This is because
+            // the low "anchor" on receives may skip rows, and need to reset the anchors
+            var batchTimeLimit = queuePeeker.PeekDelay > MinimumBatchDuration ? queuePeeker.PeekDelay : MinimumBatchDuration;
+            var batchStarted = timeProvider.GetTimestamp();
+
             var receiveLatch = new ReceiveCountdownEvent(maximumConcurrentProcessing);
             for (var i = 0; i < maximumConcurrentProcessing; i++)
             {
@@ -223,6 +230,14 @@
                 var localConcurrencyLimiter = concurrencyLimiter;
 
                 await localConcurrencyLimiter.WaitAsync(messageReceivingCancellationToken).ConfigureAwait(false);
+
+                if (timeProvider.GetElapsedTime(batchStarted) >= batchTimeLimit)
+                {
+                    // Batch hit the time limit - bail out of it, causing another peek
+                    localConcurrencyLimiter.Release();
+                    receiveLatch.Skip(maximumConcurrentProcessing - i);
+                    break;
+                }
 
                 _ = ProcessMessagesSwallowExceptionsAndReleaseConcurrencyLimiter(stopBatchCancellationSource,
                     localConcurrencyLimiter, receiveLatch, messageProcessingCancellationTokenSource.Token);
@@ -288,8 +303,10 @@
         readonly IPeekMessagesInQueue queuePeeker;
         readonly bool purgeAllMessagesOnStartup;
         readonly IExceptionClassifier exceptionClassifier;
+        readonly TimeProvider timeProvider;
         TimeSpan waitTimeCircuitBreaker;
         readonly ReceiveState receiveState = new();
+        static readonly TimeSpan MinimumBatchDuration = TimeSpan.FromSeconds(1);
         volatile SemaphoreSlim concurrencyLimiter;
         CancellationTokenSource messageReceivingCancellationTokenSource;
         CancellationTokenSource messageProcessingCancellationTokenSource;

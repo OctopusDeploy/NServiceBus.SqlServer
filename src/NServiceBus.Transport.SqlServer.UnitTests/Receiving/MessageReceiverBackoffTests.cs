@@ -3,6 +3,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Time.Testing;
 using NServiceBus.Extensibility;
 using NServiceBus.Transport;
 using NServiceBus.Transport.Sql.Shared;
@@ -50,10 +51,42 @@ public class MessageReceiverBackoffTests
         Assert.That(peeker.PeekCount, Is.GreaterThan(20));
     }
 
+    [Test]
+    public async Task Ends_a_busy_batch_once_its_duration_has_passed()
+    {
+        // every receive succeeds, so the batch never ends on an empty receive; each one moves the
+        // clock on 300ms, so the 1s minimum batch duration has passed after the fourth
+        var timeProvider = new FakeTimeProvider();
+        var receives = 0;
+        var queue = new FakeQueue(() =>
+        {
+            Interlocked.Increment(ref receives);
+            timeProvider.Advance(TimeSpan.FromMilliseconds(300));
+            return MessageReadResult.Success(new Message("1", string.Empty, Array.Empty<byte>(), false), 1);
+        });
+        var receivesAtSecondPeek = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        CountingPeeker peeker = null;
+        peeker = new CountingPeeker(peekDelay: TimeSpan.FromMilliseconds(200), messageCount: 1_000_000, onPeek: () =>
+        {
+            if (peeker.PeekCount == 2)
+            {
+                receivesAtSecondPeek.TrySetResult(Volatile.Read(ref receives));
+            }
+        });
+        var receiver = CreateReceiver(peeker, queue, timeProvider);
+
+        await receiver.Initialize(new PushRuntimeSettings(1), (_, _) => Task.CompletedTask, (_, _) => Task.FromResult(ErrorHandleResult.Handled), CancellationToken).ConfigureAwait(false);
+        await receiver.StartReceive(CancellationToken).ConfigureAwait(false);
+        var receivesInFirstBatch = await receivesAtSecondPeek.Task.WaitAsync(TimeSpan.FromSeconds(10), CancellationToken).ConfigureAwait(false);
+        await receiver.StopReceive(CancellationToken).ConfigureAwait(false);
+
+        Assert.That(receivesInFirstBatch, Is.EqualTo(4));
+    }
+
     static MessageReceiver CreateReceiver(CountingPeeker peeker) =>
         CreateReceiver(peeker, new FakeQueue(() => MessageReadResult.NoMessage));
 
-    static MessageReceiver CreateReceiver(CountingPeeker peeker, FakeQueue queue)
+    static MessageReceiver CreateReceiver(CountingPeeker peeker, FakeQueue queue, TimeProvider timeProvider = null)
     {
         var classifier = new SqlServerExceptionClassifier();
 
@@ -70,10 +103,13 @@ public class MessageReceiverBackoffTests
             TimeSpan.FromSeconds(30),
             new FakeSubscriptionManager(),
             false,
-            classifier);
+            classifier,
+            timeProvider ?? TimeProvider.System);
     }
 
-    class CountingPeeker(TimeSpan peekDelay, Action onPeek = null) : IPeekMessagesInQueue
+    static CancellationToken CancellationToken => TestContext.CurrentContext.CancellationToken;
+
+    class CountingPeeker(TimeSpan peekDelay, Action onPeek = null, int messageCount = 10) : IPeekMessagesInQueue
     {
         int peekCount;
 
@@ -85,7 +121,7 @@ public class MessageReceiverBackoffTests
         {
             Interlocked.Increment(ref peekCount);
             onPeek?.Invoke();
-            return Task.FromResult(new PeekResult(10, 1));
+            return Task.FromResult(new PeekResult(messageCount, 1));
         }
 
         public Task WaitForPeekDelay(CancellationToken cancellationToken = default) => Task.Delay(peekDelay, cancellationToken);

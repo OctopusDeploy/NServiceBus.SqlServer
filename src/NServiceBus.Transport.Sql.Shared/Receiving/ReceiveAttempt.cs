@@ -19,13 +19,16 @@ namespace NServiceBus.Transport.Sql.Shared
             }
             receiveStarted = true;
 
-            var receiveResult = await inputQueue.TryReceive(connection, transaction, receiveState.GetAnchor(), cancellationToken).ConfigureAwait(false);
+            var anchor = receiveState.GetAnchor();
+            var receiveResult = await inputQueue.TryReceive(connection, transaction, anchor.Anchor, cancellationToken).ConfigureAwait(false);
 
             if (receiveResult != MessageReadResult.NoMessage)
             {
                 receivedRowVersion = receiveResult.RowVersion;
                 receiveState.MarkReceived();
             }
+
+            receiveState.AdvanceOrEndSweep(anchor, receivedRowVersion);
 
             receiveCountdownEventSignaler.Signal();
 
@@ -54,7 +57,7 @@ namespace NServiceBus.Transport.Sql.Shared
                     receiveState.AdvanceAnchor(rowVersion);
                     break;
                 case ProcessOutcome.RolledBack:
-                    receiveState.RetreatAnchor(rowVersion);
+                    receiveState.RescanFrom(rowVersion);
                     break;
                 case ProcessOutcome.NoMessage:
                 default:
