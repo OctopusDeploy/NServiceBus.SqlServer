@@ -13,7 +13,17 @@ public class ConfigureSqlServerTransportInfrastructure : IConfigureTransportInfr
         Environment.GetEnvironmentVariable("SqlServerTransportConnectionString")
         ?? @"Data Source=.\SQLEXPRESS;Initial Catalog=nservicebus;Integrated Security=True;TrustServerCertificate=true";
 
-    public TransportDefinition CreateTransportDefinition() => new SqlServerTransport(ConnectionString);
+    public TransportDefinition CreateTransportDefinition()
+    {
+        var transport = new SqlServerTransport(ConnectionString);
+
+        if (Enum.TryParse<ReceiveStrategy>(Environment.GetEnvironmentVariable("SqlServerTransportReceiveStrategy"), out var receiveStrategy))
+        {
+            transport.QueuePeeker.ReceiveStrategy = receiveStrategy;
+        }
+
+        return transport;
+    }
 
     public async Task<TransportInfrastructure> Configure(TransportDefinition transportDefinition, HostSettings hostSettings, QueueAddress queueAddress, string errorQueueName, CancellationToken cancellationToken = default)
     {

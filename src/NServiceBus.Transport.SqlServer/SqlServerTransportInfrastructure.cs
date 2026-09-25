@@ -125,7 +125,17 @@ namespace NServiceBus.Transport.SqlServer
                 guarantee => SelectProcessStrategy(guarantee, transactionOptions, connectionFactory);
 
             var queuePurger = new QueuePurger(connectionFactory);
-            var queuePeeker = new QueuePeeker(connectionFactory, exceptionClassifier, queuePeekerOptions.Delay);
+            Func<ReceiveState, IReceiveWavePolicy> wavePolicyFactory = queuePeekerOptions.ReceiveStrategy == ReceiveStrategy.RampedReceive
+                ? receiveState => new RampedWavePolicy(receiveState, queuePeekerOptions.Delay, queuePeekerOptions.MaxReceiveWave, TimeProvider.System)
+                : receiveState => new PeekWavePolicy(new QueuePeeker(connectionFactory, exceptionClassifier, queuePeekerOptions.Delay), receiveState);
+
+            diagnostics.Add("Receiving", new
+            {
+                queuePeekerOptions.ReceiveStrategy,
+                queuePeekerOptions.Delay,
+                queuePeekerOptions.MaxReceiveWave,
+                queuePeekerOptions.HeadSweepInterval
+            });
 
             IExpiredMessagesPurger expiredMessagesPurger;
             bool validateExpiredIndex;
@@ -196,7 +206,7 @@ namespace NServiceBus.Transport.SqlServer
 
                 return new SqlServerMessageReceiver(transport, receiveSetting.Id, receiveAddress, receiveSetting.ErrorQueue, hostSettings.CriticalErrorAction, processStrategyFactory, queueFactory, queuePurger,
                     expiredMessagesPurger,
-                    queuePeeker, transport.QueuePeeker.HeadSweepInterval, schemaVerification, transport.TimeToWaitBeforeTriggeringCircuitBreaker, subscriptionManager, receiveSetting.PurgeOnStartup, exceptionClassifier, TimeProvider.System);
+                    wavePolicyFactory, queuePeekerOptions.HeadSweepInterval, schemaVerification, transport.TimeToWaitBeforeTriggeringCircuitBreaker, subscriptionManager, receiveSetting.PurgeOnStartup, exceptionClassifier, TimeProvider.System);
 
             }).ToDictionary<MessageReceiver, string, IMessageReceiver>(receiver => receiver.Id, receiver => receiver);
 

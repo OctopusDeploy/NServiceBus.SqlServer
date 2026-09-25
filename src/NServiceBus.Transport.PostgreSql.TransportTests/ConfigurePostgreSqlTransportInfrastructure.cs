@@ -17,7 +17,17 @@ public class ConfigurePostgreSqlTransportInfrastructure : IConfigureTransportInf
         Environment.GetEnvironmentVariable("PostgreSqlTransportConnectionString") ??
         @"User ID=user;Password=admin;Host=localhost;Port=54320;Database=nservicebus;Pooling=true;Connection Lifetime=0;";
 
-    public TransportDefinition CreateTransportDefinition() => new PostgreSqlTransport(ConnectionString);
+    public TransportDefinition CreateTransportDefinition()
+    {
+        var transport = new PostgreSqlTransport(ConnectionString);
+
+        if (Enum.TryParse<ReceiveStrategy>(Environment.GetEnvironmentVariable("PostgreSqlTransportReceiveStrategy"), out var receiveStrategy))
+        {
+            transport.QueuePeeker.ReceiveStrategy = receiveStrategy;
+        }
+
+        return transport;
+    }
 
     public async Task<TransportInfrastructure> Configure(TransportDefinition transportDefinition, HostSettings hostSettings, QueueAddress queueAddress, string errorQueueName, CancellationToken cancellationToken = default)
     {

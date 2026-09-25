@@ -7,7 +7,7 @@ namespace NServiceBus.Transport.Sql.Shared
 
     /// <summary>
     /// A single receive handed to a <see cref="ProcessStrategy"/> by the receive loop.
-    /// Owns the anchored query and reports back to the loop (the receive latch, the batch backoff and stopping an empty batch).
+    /// Owns the anchored query and reports back to the loop (the receive latch, counting messages found, and stopping an empty batch).
     /// </summary>
     sealed class ReceiveAttempt(TableBasedQueue inputQueue, ReceiveState receiveState, ReceiveCountdownEvent.Signaler receiveCountdownEventSignaler, CancellationTokenSource stopBatchCancellationTokenSource)
     {
@@ -25,12 +25,11 @@ namespace NServiceBus.Transport.Sql.Shared
             if (receiveResult != MessageReadResult.NoMessage)
             {
                 receivedRowVersion = receiveResult.RowVersion;
-                receiveState.MarkReceived();
             }
 
             receiveState.AdvanceOrEndSweep(anchor, receivedRowVersion);
 
-            receiveCountdownEventSignaler.Signal();
+            receiveCountdownEventSignaler.Signal(messageFound: receivedRowVersion.HasValue);
 
             if (receiveResult == MessageReadResult.NoMessage)
             {

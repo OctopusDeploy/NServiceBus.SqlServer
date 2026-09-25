@@ -19,7 +19,9 @@ namespace NServiceBus.Transport.Sql.Shared
     /// </para>
     /// <para>
     /// The sweep should also be triggered periodically, as out-of-order commits can also leave gaps
-    /// in message processing.
+    /// in message processing. Without a peek (ramped receive) only local rollbacks are detected, so
+    /// rows stranded by other instances are found by the periodic sweep, and by sweeping from the
+    /// head on the probe that follows an empty wave.
     /// </para>
     /// </remarks>
     class ReceiveState(bool anchoringEnabled)
@@ -140,18 +142,10 @@ namespace NServiceBus.Transport.Sql.Shared
             }
         }
 
-        /// <summary>
-        /// Starts a new "receive" batch and returns true if the previous batch received anything
-        /// </summary>
-        public bool BeginBatch() => Interlocked.Exchange(ref receivedInBatch, 0) == 1;
-        public void MarkReceived() => Interlocked.Exchange(ref receivedInBatch, 1);
-
         const long NoSweep = long.MaxValue;
 
         long anchor;
         long sweepAnchor = NoSweep;
-        // starts set so the first batch does not wait for the peek delay
-        int receivedInBatch = 1;
     }
 
     enum AnchorKind { Fast, Sweep }

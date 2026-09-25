@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 class ReceiveCountdownEvent
 {
     int count;
+    int messagesFound;
     readonly TaskCompletionSource completionSource;
 
     public ReceiveCountdownEvent(int count)
@@ -20,6 +21,11 @@ class ReceiveCountdownEvent
         }
     }
 
+    /// <summary>
+    /// The number of receives that reported finding a message. Read after <see cref="WaitAsync"/> completes.
+    /// </summary>
+    public int MessagesFound => Volatile.Read(ref messagesFound);
+
     public async Task WaitAsync(CancellationToken cancellationToken = default)
     {
         var registration = cancellationToken.Register(static state => ((TaskCompletionSource)state).TrySetResult(), completionSource);
@@ -29,8 +35,24 @@ class ReceiveCountdownEvent
 
     public Signaler GetSignaler() => new(this);
 
-    void Signal()
+    /// <summary>
+    /// Releases the slots of receives that were never started, so waiting does not depend on them.
+    /// </summary>
+    public void Skip(int receives)
     {
+        if (receives > 0 && Interlocked.Add(ref count, -receives) == 0)
+        {
+            _ = completionSource.TrySetResult();
+        }
+    }
+
+    void Signal(bool messageFound)
+    {
+        if (messageFound)
+        {
+            _ = Interlocked.Increment(ref messagesFound);
+        }
+
         if (Interlocked.Decrement(ref count) == 0)
         {
             _ = completionSource.TrySetResult();
@@ -41,14 +63,14 @@ class ReceiveCountdownEvent
     {
         bool signalled;
 
-        public void Signal()
+        public void Signal(bool messageFound)
         {
             if (signalled)
             {
                 return;
             }
 
-            parent.Signal();
+            parent.Signal(messageFound);
             signalled = true;
         }
 
@@ -59,7 +81,7 @@ class ReceiveCountdownEvent
                 return;
             }
 
-            parent.Signal();
+            parent.Signal(false);
             signalled = true;
         }
     }

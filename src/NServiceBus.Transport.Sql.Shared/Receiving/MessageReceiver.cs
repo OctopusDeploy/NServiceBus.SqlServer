@@ -16,7 +16,7 @@
             Func<TransportTransactionMode, ProcessStrategy> processStrategyFactory,
             Func<string, TableBasedQueue> queueFactory,
             IPurgeQueues queuePurger,
-            IPeekMessagesInQueue queuePeeker,
+            Func<ReceiveState, IReceiveWavePolicy> wavePolicyFactory,
             TimeSpan? headSweepInterval,
             TimeSpan waitTimeCircuitBreaker,
             ISubscriptionManager subscriptionManager,
@@ -28,7 +28,6 @@
             this.processStrategyFactory = processStrategyFactory;
             this.queuePurger = queuePurger;
             this.queueFactory = queueFactory;
-            this.queuePeeker = queuePeeker;
             this.waitTimeCircuitBreaker = waitTimeCircuitBreaker;
             this.errorQueueAddress = errorQueueAddress;
             this.criticalErrorAction = criticalErrorAction;
@@ -40,6 +39,7 @@
                 this.headSweepInterval = interval > MinimumHeadSweepInterval ? interval : MinimumHeadSweepInterval;
             }
             receiveState = new ReceiveState(anchoringEnabled: headSweepInterval.HasValue);
+            wavePolicy = wavePolicyFactory(receiveState);
             Subscriptions = subscriptionManager;
             Id = receiverId;
             ReceiveAddress = receiveAddress;
@@ -83,7 +83,6 @@
 
         public Task StartReceive(CancellationToken cancellationToken = default)
         {
-            inputQueue.FormatPeekCommand();
             maxConcurrency = limitations.MaxConcurrency;
             concurrencyLimiter = new SemaphoreSlim(limitations.MaxConcurrency);
 
@@ -92,6 +91,7 @@
             messageProcessingCancellationTokenSource = new CancellationTokenSource();
             messageReceivingCircuitBreaker = new RepeatedFailuresOverTimeCircuitBreaker("message receiving", waitTimeCircuitBreaker, ex => criticalErrorAction("Failed to peek " + ReceiveAddress, ex, messageProcessingCancellationTokenSource.Token));
             messageProcessingCircuitBreaker = new RepeatedFailuresOverTimeCircuitBreaker("message processing", waitTimeCircuitBreaker, ex => criticalErrorAction("Failed to receive from " + ReceiveAddress, ex, messageProcessingCancellationTokenSource.Token));
+            wavePolicy.Start(inputQueue, messageReceivingCircuitBreaker);
 
             // Task.Run() so the call returns immediately instead of waiting for the first await or return down the call stack
             messageReceivingTask =
@@ -193,22 +193,12 @@
 
         async Task ReceiveMessages(CancellationToken messageReceivingCancellationToken)
         {
-            // each receive of the previous batch reports into the state before signalling its latch
-            if (!receiveState.BeginBatch())
-            {
-                await queuePeeker.WaitForPeekDelay(messageReceivingCancellationToken).ConfigureAwait(false);
-            }
+            var waveSize = await wavePolicy.NextWaveSize(maxConcurrency, messageReceivingCancellationToken).ConfigureAwait(false);
 
-            var peekResult = await queuePeeker
-                .Peek(inputQueue, messageReceivingCircuitBreaker, messageReceivingCancellationToken)
-                .ConfigureAwait(false);
-
-            if (peekResult.MessageCount == 0)
+            if (waveSize == 0)
             {
                 return;
             }
-
-            receiveState.ApplyPeekResult(peekResult.LowestRowVersion);
 
             messageReceivingCancellationToken.ThrowIfCancellationRequested();
 
@@ -216,13 +206,14 @@
             var stopBatchCancellationSource = new CancellationTokenSource();
 
             // If either the receiving or processing circuit breakers are triggered, start only one message processing task at a time.
-            var maximumConcurrentProcessing =
-                messageProcessingCircuitBreaker.IsTriggered || messageReceivingCircuitBreaker.IsTriggered
-                    ? 1
-                    : peekResult.MessageCount;
+            if (messageProcessingCircuitBreaker.IsTriggered || messageReceivingCircuitBreaker.IsTriggered)
+            {
+                waveSize = 1;
+            }
 
-            var receiveLatch = new ReceiveCountdownEvent(maximumConcurrentProcessing);
-            for (var i = 0; i < maximumConcurrentProcessing; i++)
+            var receiveLatch = new ReceiveCountdownEvent(waveSize);
+            var started = 0;
+            for (; started < waveSize; started++)
             {
                 if (stopBatchCancellationSource.IsCancellationRequested)
                 {
@@ -246,8 +237,16 @@
                     localConcurrencyLimiter, receiveLatch, messageProcessingCancellationTokenSource.Token);
             }
 
-            // Wait for all receive operations to complete before returning (and thus peeking again)
-            await receiveLatch.WaitAsync(stopBatchCancellationSource.Token).ConfigureAwait(false);
+            // an empty receive stops the wave from starting more
+            receiveLatch.Skip(waveSize - started);
+
+            // Every started receive must report before the wave is judged, not just the first empty one.
+            // Receives report when their query completes, before the message is handled, so this is short.
+            await receiveLatch.WaitAsync(messageReceivingCancellationToken).ConfigureAwait(false);
+
+            messageReceivingCircuitBreaker.Success();
+
+            await wavePolicy.WaveCompleted(started, receiveLatch.MessagesFound, messageReceivingCancellationToken).ConfigureAwait(false);
         }
 
         async Task ProcessMessagesSwallowExceptionsAndReleaseConcurrencyLimiter(
@@ -303,7 +302,6 @@
         readonly Func<TransportTransactionMode, ProcessStrategy> processStrategyFactory;
         readonly IPurgeQueues queuePurger;
         readonly Func<string, TableBasedQueue> queueFactory;
-        readonly IPeekMessagesInQueue queuePeeker;
         readonly bool purgeAllMessagesOnStartup;
         readonly IExceptionClassifier exceptionClassifier;
         readonly TimeProvider timeProvider;
@@ -311,6 +309,7 @@
         long lastHeadSweep;
         TimeSpan waitTimeCircuitBreaker;
         readonly ReceiveState receiveState;
+        readonly IReceiveWavePolicy wavePolicy;
         static readonly TimeSpan MinimumHeadSweepInterval = TimeSpan.FromSeconds(1);
         volatile SemaphoreSlim concurrencyLimiter;
         CancellationTokenSource messageReceivingCancellationTokenSource;
