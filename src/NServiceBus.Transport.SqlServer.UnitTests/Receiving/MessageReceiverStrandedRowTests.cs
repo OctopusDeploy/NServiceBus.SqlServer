@@ -3,6 +3,7 @@ namespace NServiceBus.Transport.SqlServer.UnitTests.Receiving;
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -15,8 +16,9 @@ using NUnit.Framework;
 
 public class MessageReceiverStrandedRowTests
 {
-    [Test]
-    public async Task Picks_up_a_row_that_reappears_behind_the_anchor_by_the_next_head_sweep()
+    [TestCase(ReceiveStrategy.PeekReceive)]
+    [TestCase(ReceiveStrategy.RampedReceive)]
+    public async Task Picks_up_a_row_that_reappears_behind_the_anchor_by_the_next_head_sweep(ReceiveStrategy receiveStrategy)
     {
         // Every receive moves the clock on 10ms, so a head sweep (1s minimum interval) runs every ~100
         // receives. After 300 receives a row reappears far behind the anchor, as if it rolled back
@@ -43,7 +45,7 @@ public class MessageReceiverStrandedRowTests
             }
         };
 
-        var receiver = CreateReceiver(queue, timeProvider);
+        var receiver = CreateReceiver(queue, timeProvider, receiveStrategy);
 
         await receiver.Initialize(new PushRuntimeSettings(4), (_, _) => Task.CompletedTask, (_, _) => Task.FromResult(ErrorHandleResult.Handled), CancellationToken).ConfigureAwait(false);
         await receiver.StartReceive(CancellationToken).ConfigureAwait(false);
@@ -54,8 +56,9 @@ public class MessageReceiverStrandedRowTests
         Assert.That(receivedAt - receivesBeforeStranding, Is.LessThanOrEqualTo(110));
     }
 
-    [Test]
-    public async Task Sweeps_from_the_head_once_per_interval_on_a_busy_queue()
+    [TestCase(ReceiveStrategy.PeekReceive, 99)]
+    [TestCase(ReceiveStrategy.RampedReceive, 0)]
+    public async Task Sweeps_from_the_head_once_per_interval_on_a_busy_queue(ReceiveStrategy receiveStrategy, long firstAnchor)
     {
         // every receive finds a row, so the batch never ends; each one moves the clock on 300ms, so
         // the 1s minimum sweep interval has passed by the fifth
@@ -79,18 +82,65 @@ public class MessageReceiverStrandedRowTests
             }
         };
 
-        var receiver = CreateReceiver(queue, timeProvider);
+        var receiver = CreateReceiver(queue, timeProvider, receiveStrategy);
 
         await receiver.Initialize(new PushRuntimeSettings(1), (_, _) => Task.CompletedTask, (_, _) => Task.FromResult(ErrorHandleResult.Handled), CancellationToken).ConfigureAwait(false);
         await receiver.StartReceive(CancellationToken).ConfigureAwait(false);
         await sixReceives.Task.WaitAsync(TimeSpan.FromSeconds(10), CancellationToken).ConfigureAwait(false);
         await receiver.StopReceive(CancellationToken).ConfigureAwait(false);
 
-        // from the peek's lowest row, then the head sweep, which finds nothing stranded and hands back to the anchor
-        Assert.That(anchors.Take(6), Is.EqualTo(new long[] { 99, 100, 101, 102, 0, 104 }));
+        // from the peek's lowest row (or the head, without a peek), then the head sweep, which finds nothing stranded and hands back to the anchor
+        Assert.That(anchors.Take(6), Is.EqualTo(new[] { firstAnchor, 100, 101, 102, 0, 104 }));
     }
 
-    static MessageReceiver CreateReceiver(InMemoryQueue queue, TimeProvider timeProvider)
+    [Test]
+    public async Task Ramped_receive_picks_up_a_row_stranded_while_idle_on_the_probe_after_the_backoff()
+    {
+        // The queue drains, then a row reappears far behind the anchor, as if it rolled back on another
+        // instance. The head sweep interval is far off, so only the probe sweeping from the head finds it.
+        const long strandedRowVersion = 5;
+
+        var timeProvider = new FakeTimeProvider();
+        var queue = new InMemoryQueue(Enumerable.Range(100, 10).Select(i => (long)i));
+        var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var strandedReceivedFrom = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        queue.OnReceive = (anchor, _, rowVersion) =>
+        {
+            if (rowVersion is null)
+            {
+                drained.TrySetResult();
+            }
+
+            if (rowVersion == strandedRowVersion)
+            {
+                strandedReceivedFrom.TrySetResult(anchor);
+            }
+        };
+
+        var receiver = CreateReceiver(queue, timeProvider, ReceiveStrategy.RampedReceive, headSweepInterval: TimeSpan.FromHours(1));
+
+        await receiver.Initialize(new PushRuntimeSettings(4), (_, _) => Task.CompletedTask, (_, _) => Task.FromResult(ErrorHandleResult.Handled), CancellationToken).ConfigureAwait(false);
+        await receiver.StartReceive(CancellationToken).ConfigureAwait(false);
+        await drained.Task.WaitAsync(TimeSpan.FromSeconds(10), CancellationToken).ConfigureAwait(false);
+
+        queue.Add(strandedRowVersion);
+
+        // the backoff may not have started yet, so keep moving the clock on until the probe runs
+        var stopwatch = Stopwatch.StartNew();
+        while (!strandedReceivedFrom.Task.IsCompleted && stopwatch.Elapsed < TimeSpan.FromSeconds(10))
+        {
+            timeProvider.Advance(RampedBackoff);
+            await Task.Delay(10, CancellationToken).ConfigureAwait(false);
+        }
+
+        var receivedFrom = await strandedReceivedFrom.Task.WaitAsync(TimeSpan.FromSeconds(1), CancellationToken).ConfigureAwait(false);
+        await receiver.StopReceive(CancellationToken).ConfigureAwait(false);
+
+        Assert.That(receivedFrom, Is.Zero, "found by a receive from the head");
+    }
+
+    static MessageReceiver CreateReceiver(InMemoryQueue queue, TimeProvider timeProvider, ReceiveStrategy receiveStrategy, TimeSpan? headSweepInterval = null)
     {
         var classifier = new SqlServerExceptionClassifier();
 
@@ -103,14 +153,18 @@ public class MessageReceiverStrandedRowTests
             _ => new CommittingStrategy(classifier),
             _ => queue,
             new FakePurger(),
-            state => new PeekWavePolicy(new InMemoryPeeker(), state),
-            TimeSpan.FromSeconds(1),
+            state => receiveStrategy == ReceiveStrategy.RampedReceive
+                ? new RampedWavePolicy(state, RampedBackoff, 64, timeProvider)
+                : new PeekWavePolicy(new InMemoryPeeker(), state),
+            headSweepInterval ?? TimeSpan.FromSeconds(1),
             TimeSpan.FromSeconds(30),
             new FakeSubscriptionManager(),
             false,
             classifier,
             timeProvider);
     }
+
+    static readonly TimeSpan RampedBackoff = TimeSpan.FromMilliseconds(200);
 
     static CancellationToken CancellationToken => TestContext.CurrentContext.CancellationToken;
 

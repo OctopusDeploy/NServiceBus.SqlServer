@@ -12,7 +12,7 @@ namespace NServiceBus
         internal QueuePeekerOptions() { }
 
         /// <summary>
-        /// Time delay between peeks.
+        /// Time delay between peeks, or with <see cref="NServiceBus.ReceiveStrategy.RampedReceive"/> the backoff after a wave of receives that found nothing.
         /// </summary>
         public TimeSpan Delay
         {
@@ -51,6 +51,33 @@ namespace NServiceBus
             get;
             set;
         }
+
+        /// <summary>
+        /// How the message pump decides how many receives to start at once. Defaults to <see cref="NServiceBus.ReceiveStrategy.PeekReceive"/>.
+        /// </summary>
+        public ReceiveStrategy ReceiveStrategy { get; set; } = ReceiveStrategy.PeekReceive;
+
+        /// <summary>
+        /// The maximum number of receives <see cref="NServiceBus.ReceiveStrategy.RampedReceive"/> starts in one wave. Defaults to 64.
+        /// </summary>
+        /// <remarks>
+        /// Waves are also capped at the message processing concurrency. Large waves are synchronized bursts of receive queries against
+        /// the head of the queue; smaller hosts may do as well or better with a lower cap.
+        /// </remarks>
+        public int MaxReceiveWave
+        {
+            get;
+            set
+            {
+                if (value < 1)
+                {
+                    var message = "Maximum receive wave is invalid. The value must be greater than zero.";
+                    throw new Exception(message);
+                }
+
+                field = value;
+            }
+        } = 64;
 
         /// <summary>
         /// Maximal number of records to peek.

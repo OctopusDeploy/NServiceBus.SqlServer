@@ -34,10 +34,17 @@ namespace NServiceBus
     {
         public System.TimeSpan Delay { get; set; }
         public System.TimeSpan? HeadSweepInterval { get; set; }
+        public int MaxReceiveWave { get; set; }
         [System.Obsolete("The queue peek batch size has no effect and should be removed from the configurat" +
             "ion. Will be treated as an error from version 10.0.0. Will be removed in version" +
             " 11.0.0.", false)]
         public int? MaxRecordsToPeek { get; set; }
+        public NServiceBus.ReceiveStrategy ReceiveStrategy { get; set; }
+    }
+    public enum ReceiveStrategy
+    {
+        PeekReceive = 0,
+        RampedReceive = 1,
     }
     public static class SendOptionsExtensions
     {

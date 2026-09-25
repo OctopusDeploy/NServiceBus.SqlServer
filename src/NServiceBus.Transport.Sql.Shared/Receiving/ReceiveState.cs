@@ -19,7 +19,9 @@ namespace NServiceBus.Transport.Sql.Shared
     /// </para>
     /// <para>
     /// The sweep should also be triggered periodically, as out-of-order commits can also leave gaps
-    /// in message processing.
+    /// in message processing. Without a peek (ramped receive) only local rollbacks are detected, so
+    /// rows stranded by other instances are found by the periodic sweep, and by sweeping from the
+    /// head on the probe that follows an empty wave.
     /// </para>
     /// </remarks>
     class ReceiveState(bool anchoringEnabled)

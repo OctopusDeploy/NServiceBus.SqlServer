@@ -153,8 +153,17 @@ class PostgreSqlTransportInfrastructure : TransportInfrastructure
             guarantee => SelectProcessStrategy(guarantee, transactionOptions, connectionFactory);
 
         var queuePurger = new QueuePurger(connectionFactory);
-        var queuePeeker = new QueuePeeker(connectionFactory, exceptionClassifier, queuePeekerOptions.Delay);
-        Func<ReceiveState, IReceiveWavePolicy> wavePolicyFactory = receiveState => new PeekWavePolicy(queuePeeker, receiveState);
+        Func<ReceiveState, IReceiveWavePolicy> wavePolicyFactory = queuePeekerOptions.ReceiveStrategy == ReceiveStrategy.RampedReceive
+            ? receiveState => new RampedWavePolicy(receiveState, queuePeekerOptions.Delay, queuePeekerOptions.MaxReceiveWave, TimeProvider.System)
+            : receiveState => new PeekWavePolicy(new QueuePeeker(connectionFactory, exceptionClassifier, queuePeekerOptions.Delay), receiveState);
+
+        diagnostics.Add("Receiving", new
+        {
+            queuePeekerOptions.ReceiveStrategy,
+            queuePeekerOptions.Delay,
+            queuePeekerOptions.MaxReceiveWave,
+            queuePeekerOptions.HeadSweepInterval
+        });
 
         var queueFactory = new Func<string, PostgreSqlTableBasedQueue>(queueName => new PostgreSqlTableBasedQueue(sqlConstants,
             addressTranslator.Parse(queueName).QualifiedTableName, queueName, true));

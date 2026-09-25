@@ -1,6 +1,7 @@
 namespace NServiceBus.Transport.SqlServer.UnitTests.Receiving;
 
 using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using NServiceBus.Extensibility;
@@ -43,6 +44,46 @@ public class MessageReceiverBackoffTests
     }
 
     [Test]
+    public async Task Ramped_receive_backs_off_when_the_queue_is_empty()
+    {
+        var queue = new FakeQueue(_ => MessageReadResult.NoMessage);
+        var receiver = CreateReceiver(RampedPolicy(), queue);
+
+        await RunFor(receiver, concurrency: 8, TimeSpan.FromMilliseconds(700), CancellationToken).ConfigureAwait(false);
+
+        // one probe per 200ms backoff; an unthrottled pump reaches thousands
+        Assert.That(queue.ReceiveCount, Is.LessThanOrEqualTo(6));
+    }
+
+    [Test]
+    public async Task Ramped_receive_does_not_back_off_after_a_partial_wave()
+    {
+        // Two of every three receives find a message, so waves alternate between one receive that
+        // finds a message and two receives of which one does. Results are delayed so that both
+        // receives of a wave start before the empty one stops it.
+        var queue = new FakeQueue(call => call % 3 != 0 ? Message() : MessageReadResult.NoMessage, TimeSpan.FromMilliseconds(5));
+        var receiver = CreateReceiver(RampedPolicy(), queue);
+
+        await RunFor(receiver, concurrency: 8, TimeSpan.FromMilliseconds(700), CancellationToken).ConfigureAwait(false);
+
+        Assert.That(queue.ReceiveCount, Is.GreaterThan(20));
+    }
+
+    [Test]
+    public async Task Ramped_waves_never_start_more_receives_than_the_cap()
+    {
+        var queue = new FakeQueue(_ => Message(), TimeSpan.FromMilliseconds(20));
+        var receiver = CreateReceiver(RampedPolicy(maxWaveSize: 8), queue);
+
+        await receiver.Initialize(new PushRuntimeSettings(256), (_, _) => Task.CompletedTask, (_, _) => Task.FromResult(ErrorHandleResult.Handled), CancellationToken).ConfigureAwait(false);
+        await receiver.StartReceive(CancellationToken).ConfigureAwait(false);
+        await WaitUntil(() => queue.ReceiveCount >= 100, CancellationToken).ConfigureAwait(false);
+        await receiver.StopReceive(CancellationToken).ConfigureAwait(false);
+
+        Assert.That(queue.MaxConcurrentReceives, Is.EqualTo(8));
+    }
+
+    [Test]
     public async Task Judges_a_wave_only_once_every_started_receive_has_reported()
     {
         // the empty receive reports first and stops the wave, but the other receive in it still finds a message
@@ -67,6 +108,23 @@ public class MessageReceiverBackoffTests
         await Task.Delay(duration, cancellationToken).ConfigureAwait(false);
         await receiver.StopReceive(cancellationToken).ConfigureAwait(false);
     }
+
+    static async Task WaitUntil(Func<bool> condition, CancellationToken cancellationToken)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        while (!condition())
+        {
+            if (stopwatch.Elapsed > TimeSpan.FromSeconds(10))
+            {
+                Assert.Fail("Timed out waiting for the condition");
+            }
+
+            await Task.Delay(10, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    static Func<ReceiveState, IReceiveWavePolicy> RampedPolicy(int maxWaveSize = 64) =>
+        state => new RampedWavePolicy(state, TimeSpan.FromMilliseconds(200), maxWaveSize, TimeProvider.System);
 
     static MessageReadResult Message() => MessageReadResult.Success(new Message("1", string.Empty, Array.Empty<byte>(), false), 0);
 
