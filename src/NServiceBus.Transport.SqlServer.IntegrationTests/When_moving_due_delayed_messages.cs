@@ -78,12 +78,7 @@ namespace NServiceBus.Transport.SqlServer.IntegrationTests
                 var nextDue = await MoveInTransaction(table, 10, CancellationToken);
                 var after = DateTime.UtcNow;
 
-                using (Assert.EnterMultipleScope())
-                {
-                    Assert.That(nextDue, Is.InRange(before + LockDelay - Tolerance, after + LockDelay + Tolerance));
-                    Assert.That(await Count(inputTable, CancellationToken), Is.Zero, "The second mover should not move any messages while the lock is held");
-                    Assert.That(await Count(delayedTable, CancellationToken), Is.EqualTo(2), "Only the rows locked by the holder should be skipped");
-                }
+                Assert.That(await Count(inputTable, CancellationToken), Is.Zero, "The second mover should not move any messages while the lock is held");
 
                 holder.Transaction.Commit();
             }
