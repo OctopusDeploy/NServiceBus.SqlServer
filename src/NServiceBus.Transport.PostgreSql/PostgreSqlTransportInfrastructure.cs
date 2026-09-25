@@ -154,6 +154,7 @@ class PostgreSqlTransportInfrastructure : TransportInfrastructure
 
         var queuePurger = new QueuePurger(connectionFactory);
         var queuePeeker = new QueuePeeker(connectionFactory, exceptionClassifier, queuePeekerOptions.Delay);
+        Func<ReceiveState, IReceiveWavePolicy> wavePolicyFactory = receiveState => new PeekWavePolicy(queuePeeker, receiveState);
 
         var queueFactory = new Func<string, PostgreSqlTableBasedQueue>(queueName => new PostgreSqlTableBasedQueue(sqlConstants,
             addressTranslator.Parse(queueName).QualifiedTableName, queueName, true));
@@ -206,7 +207,7 @@ class PostgreSqlTransportInfrastructure : TransportInfrastructure
 
             return new MessageReceiver(transport, receiveSetting.Id, receiveAddress, receiveSetting.ErrorQueue,
                 hostSettings.CriticalErrorAction, processStrategyFactory, queueFactory, queuePurger,
-                queuePeeker, transport.QueuePeeker.HeadSweepInterval, transport.TimeToWaitBeforeTriggeringCircuitBreaker,
+                wavePolicyFactory, queuePeekerOptions.HeadSweepInterval, transport.TimeToWaitBeforeTriggeringCircuitBreaker,
                 subscriptionManager, receiveSetting.PurgeOnStartup, exceptionClassifier, TimeProvider.System);
         }).ToDictionary<MessageReceiver, string, IMessageReceiver>(receiver => receiver.Id, receiver => receiver);
 

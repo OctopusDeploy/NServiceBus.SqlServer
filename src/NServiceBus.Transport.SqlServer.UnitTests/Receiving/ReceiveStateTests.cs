@@ -191,29 +191,4 @@ public class ReceiveStateTests
 
         Assert.That(state.GetAnchor(), Is.EqualTo(ReceiveAnchor.Fast(0)));
     }
-
-    [Test]
-    public void First_batch_does_not_back_off()
-    {
-        var state = new ReceiveState(anchoringEnabled: true);
-
-        Assert.That(state.BeginBatch(), Is.True);
-    }
-
-    [Test]
-    public void Reports_whether_the_previous_batch_received_anything()
-    {
-        var state = new ReceiveState(anchoringEnabled: true);
-        _ = state.BeginBatch();
-
-        Assert.That(state.BeginBatch(), Is.False, "nothing received in the previous batch");
-
-        state.MarkReceived();
-
-        Assert.Multiple(() =>
-        {
-            Assert.That(state.BeginBatch(), Is.True, "previous batch received a message");
-            Assert.That(state.BeginBatch(), Is.False, "starting a batch clears the flag");
-        });
-    }
 }

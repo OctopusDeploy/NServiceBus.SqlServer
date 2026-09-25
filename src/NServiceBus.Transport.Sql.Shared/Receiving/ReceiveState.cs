@@ -140,18 +140,10 @@ namespace NServiceBus.Transport.Sql.Shared
             }
         }
 
-        /// <summary>
-        /// Starts a new "receive" batch and returns true if the previous batch received anything
-        /// </summary>
-        public bool BeginBatch() => Interlocked.Exchange(ref receivedInBatch, 0) == 1;
-        public void MarkReceived() => Interlocked.Exchange(ref receivedInBatch, 1);
-
         const long NoSweep = long.MaxValue;
 
         long anchor;
         long sweepAnchor = NoSweep;
-        // starts set so the first batch does not wait for the peek delay
-        int receivedInBatch = 1;
     }
 
     enum AnchorKind { Fast, Sweep }

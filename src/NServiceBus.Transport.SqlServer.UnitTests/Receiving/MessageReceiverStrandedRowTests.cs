@@ -103,7 +103,7 @@ public class MessageReceiverStrandedRowTests
             _ => new CommittingStrategy(classifier),
             _ => queue,
             new FakePurger(),
-            new InMemoryPeeker(),
+            state => new PeekWavePolicy(new InMemoryPeeker(), state),
             TimeSpan.FromSeconds(1),
             TimeSpan.FromSeconds(30),
             new FakeSubscriptionManager(),
