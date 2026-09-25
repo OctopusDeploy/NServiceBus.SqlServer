@@ -20,17 +20,17 @@ namespace NServiceBus.Transport.Sql.Shared
         public MessageRow PoisonMessage { get; }
 
         /// <summary>
-        /// Position of the consumed row in the queue (RowVersion/Seq column). Only populated by
-        /// anchored receives; 0 otherwise. Not part of equality.
+        /// SqlServer's <c>RowVersion</c> or Postgres's <c>Seq</c>, used to optimize the receive query.
+        /// Not part of equality - the message is enough for that
         /// </summary>
         public long RowVersion { get; }
 
-        public static MessageReadResult Poison(MessageRow messageRow, long rowVersion = 0)
+        public static MessageReadResult Poison(MessageRow messageRow, long rowVersion)
         {
             return new MessageReadResult(null, messageRow, rowVersion);
         }
 
-        public static MessageReadResult Success(Message message, long rowVersion = 0)
+        public static MessageReadResult Success(Message message, long rowVersion)
         {
             return new MessageReadResult(message, null, rowVersion);
         }

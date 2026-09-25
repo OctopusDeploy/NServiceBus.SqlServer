@@ -1,4 +1,4 @@
-namespace NServiceBus.Transport.Sql.Shared
+﻿namespace NServiceBus.Transport.Sql.Shared
 {
     using System;
     using System.Threading;
@@ -17,11 +17,12 @@ namespace NServiceBus.Transport.Sql.Shared
             Func<string, TableBasedQueue> queueFactory,
             IPurgeQueues queuePurger,
             IPeekMessagesInQueue queuePeeker,
+            TimeSpan? headSweepInterval,
             TimeSpan waitTimeCircuitBreaker,
-            TimeSpan emptyBatchBackoff,
             ISubscriptionManager subscriptionManager,
             bool purgeAllMessagesOnStartup,
-            IExceptionClassifier exceptionClassifier)
+            IExceptionClassifier exceptionClassifier,
+            TimeProvider timeProvider)
         {
             this.transport = transport;
             this.processStrategyFactory = processStrategyFactory;
@@ -29,17 +30,16 @@ namespace NServiceBus.Transport.Sql.Shared
             this.queueFactory = queueFactory;
             this.queuePeeker = queuePeeker;
             this.waitTimeCircuitBreaker = waitTimeCircuitBreaker;
-            this.emptyBatchBackoff = emptyBatchBackoff;
-            // The head rescan is the expensive from-head receive that picks up messages which
-            // reappeared behind the anchor (e.g. rolled back on another instance). Its interval
-            // trades that pickup latency against paying the old contended head-scan cost, so it
-            // must not shrink with an aggressively tuned peek delay (e.g. 100ms) — floor it at 1s.
-            var headRescanInterval = emptyBatchBackoff > MinimumHeadRescanInterval ? emptyBatchBackoff : MinimumHeadRescanInterval;
-            receiveAnchor = new ReceiveAnchor(headRescanInterval);
             this.errorQueueAddress = errorQueueAddress;
             this.criticalErrorAction = criticalErrorAction;
             this.purgeAllMessagesOnStartup = purgeAllMessagesOnStartup;
             this.exceptionClassifier = exceptionClassifier;
+            this.timeProvider = timeProvider;
+            if (headSweepInterval is { } interval)
+            {
+                this.headSweepInterval = interval > MinimumHeadSweepInterval ? interval : MinimumHeadSweepInterval;
+            }
+            receiveState = new ReceiveState(anchoringEnabled: headSweepInterval.HasValue);
             Subscriptions = subscriptionManager;
             Id = receiverId;
             ReceiveAddress = receiveAddress;
@@ -64,7 +64,7 @@ namespace NServiceBus.Transport.Sql.Shared
             inputQueue = queueFactory(ReceiveAddress);
             errorQueue = queueFactory(errorQueueAddress);
 
-            processStrategy.Init(inputQueue, errorQueue, receiveAnchor, onMessage, onError, criticalErrorAction);
+            processStrategy.Init(inputQueue, errorQueue, onMessage, onError, criticalErrorAction);
 
             if (purgeAllMessagesOnStartup)
             {
@@ -87,6 +87,7 @@ namespace NServiceBus.Transport.Sql.Shared
             maxConcurrency = limitations.MaxConcurrency;
             concurrencyLimiter = new SemaphoreSlim(limitations.MaxConcurrency);
 
+            lastHeadSweep = timeProvider.GetTimestamp();
             messageReceivingCancellationTokenSource = new CancellationTokenSource();
             messageProcessingCancellationTokenSource = new CancellationTokenSource();
             messageReceivingCircuitBreaker = new RepeatedFailuresOverTimeCircuitBreaker("message receiving", waitTimeCircuitBreaker, ex => criticalErrorAction("Failed to peek " + ReceiveAddress, ex, messageProcessingCancellationTokenSource.Token));
@@ -192,37 +193,33 @@ namespace NServiceBus.Transport.Sql.Shared
 
         async Task ReceiveMessages(CancellationToken messageReceivingCancellationToken)
         {
-            if (lastBatchCancellationSource != null && lastBatchCancellationSource.IsCancellationRequested)
+            // each receive of the previous batch reports into the state before signalling its latch
+            if (!receiveState.BeginBatch())
             {
-                lastBatchCancellationSource = null;
-
-                // A receive in the previous batch found the queue empty even though the peek saw
-                // messages — competing instances consumed them first. Back off like an empty peek
-                // instead of re-peeking immediately, otherwise every message arrival sends all
-                // instances into a hot peek/receive loop against the same queue table.
-                await Task.Delay(emptyBatchBackoff, messageReceivingCancellationToken).ConfigureAwait(false);
+                await queuePeeker.WaitForPeekDelay(messageReceivingCancellationToken).ConfigureAwait(false);
             }
 
-            var messageCount = await queuePeeker
+            var peekResult = await queuePeeker
                 .Peek(inputQueue, messageReceivingCircuitBreaker, messageReceivingCancellationToken)
                 .ConfigureAwait(false);
 
-            if (messageCount == 0)
+            if (peekResult.MessageCount == 0)
             {
                 return;
             }
+
+            receiveState.ApplyPeekResult(peekResult.LowestRowVersion);
 
             messageReceivingCancellationToken.ThrowIfCancellationRequested();
 
             // We cannot dispose this token source because of potential race conditions of concurrent processing
             var stopBatchCancellationSource = new CancellationTokenSource();
-            lastBatchCancellationSource = stopBatchCancellationSource;
 
             // If either the receiving or processing circuit breakers are triggered, start only one message processing task at a time.
             var maximumConcurrentProcessing =
                 messageProcessingCircuitBreaker.IsTriggered || messageReceivingCircuitBreaker.IsTriggered
                     ? 1
-                    : messageCount;
+                    : peekResult.MessageCount;
 
             var receiveLatch = new ReceiveCountdownEvent(maximumConcurrentProcessing);
             for (var i = 0; i < maximumConcurrentProcessing; i++)
@@ -235,6 +232,15 @@ namespace NServiceBus.Transport.Sql.Shared
                 var localConcurrencyLimiter = concurrencyLimiter;
 
                 await localConcurrencyLimiter.WaitAsync(messageReceivingCancellationToken).ConfigureAwait(false);
+
+                // A busy queue never ends a batch, so the peek alone would rarely find rows stranded behind the
+                // anchor. Periodically sweeping from the head finds them wherever they are, including rows the
+                // batch's peek skipped because they were locked in flight at the time.
+                if (headSweepInterval is { } interval && timeProvider.GetElapsedTime(lastHeadSweep) >= interval)
+                {
+                    receiveState.SweepFromHead();
+                    lastHeadSweep = timeProvider.GetTimestamp();
+                }
 
                 _ = ProcessMessagesSwallowExceptionsAndReleaseConcurrencyLimiter(stopBatchCancellationSource,
                     localConcurrencyLimiter, receiveLatch, messageProcessingCancellationTokenSource.Token);
@@ -249,6 +255,7 @@ namespace NServiceBus.Transport.Sql.Shared
             ReceiveCountdownEvent receiveLatch, CancellationToken messageProcessingCancellationToken)
         {
             using var latchSignaler = receiveLatch.GetSignaler();
+            var receiveAttempt = new ReceiveAttempt(inputQueue, receiveState, latchSignaler, stopBatchCancellationTokenSource);
             try
             {
                 try
@@ -257,15 +264,18 @@ namespace NServiceBus.Transport.Sql.Shared
                     // in combination with TransactionScope will apply connection pooling and enlistment synchronous in ctor.
                     await Task.Yield();
 
-                    await processStrategy.ProcessMessage(stopBatchCancellationTokenSource, latchSignaler,
-                        messageProcessingCancellationToken)
+                    var outcome = await processStrategy.ProcessMessage(receiveAttempt, messageProcessingCancellationToken)
                         .ConfigureAwait(false);
+                    receiveAttempt.Settle(outcome);
 
                     messageProcessingCircuitBreaker.Success();
                 }
                 catch (Exception ex) when (!exceptionClassifier.IsOperationCancelled(ex, messageProcessingCancellationToken))
                 {
                     Logger.Warn("Message processing failed", ex);
+
+                    // a received row that was not processed has rolled back; with no row received there is nothing to settle
+                    receiveAttempt.Settle(ProcessOutcome.RolledBack);
 
                     if (!exceptionClassifier.IsDeadlockException(ex))
                     {
@@ -296,11 +306,12 @@ namespace NServiceBus.Transport.Sql.Shared
         readonly IPeekMessagesInQueue queuePeeker;
         readonly bool purgeAllMessagesOnStartup;
         readonly IExceptionClassifier exceptionClassifier;
+        readonly TimeProvider timeProvider;
+        readonly TimeSpan? headSweepInterval;
+        long lastHeadSweep;
         TimeSpan waitTimeCircuitBreaker;
-        readonly TimeSpan emptyBatchBackoff;
-        static readonly TimeSpan MinimumHeadRescanInterval = TimeSpan.FromSeconds(1);
-        readonly ReceiveAnchor receiveAnchor;
-        CancellationTokenSource lastBatchCancellationSource;
+        readonly ReceiveState receiveState;
+        static readonly TimeSpan MinimumHeadSweepInterval = TimeSpan.FromSeconds(1);
         volatile SemaphoreSlim concurrencyLimiter;
         CancellationTokenSource messageReceivingCancellationTokenSource;
         CancellationTokenSource messageProcessingCancellationTokenSource;
