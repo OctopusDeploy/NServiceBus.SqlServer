@@ -172,7 +172,6 @@ namespace NServiceBus.Transport.SqlServer.IntegrationTests
         }
 
         static readonly TimeSpan LockDelay = TimeSpan.FromSeconds(5);
-        static readonly TimeSpan Tolerance = TimeSpan.FromSeconds(1);
         const string InputQueue = "MoveDueDelayedMessagesTests";
 
         readonly SqlServerConstants sqlConstants = new();
